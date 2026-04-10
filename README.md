@@ -1,3 +1,83 @@
+# Nanobot Medical Research Fork → Hermes-Agent Medical Research Fork Port Status
+
+**Date:** 2026-04-11 04:45 UTC+07:00
+
+## Detailed Comparison Table
+
+| Feature | Nanobot | Hermes-Ported | Priority |
+|---------|---------|---------------|----------|
+| **Tiered Web Fetcher** | ✅ curl_cffi + Scrapling | ✅ Ported | **P0** |
+| **PDF Extraction** | ✅ PyMuPDF | ✅ Ported | **P0** |
+| **Reddit JSON API** | ✅ Auto-convert | ✅ Ported | **P0** |
+| **Force-Final Threshold** | ✅ max_iter - 2 | ✅ Ported | **P0** |
+| **Tool Summary Display** | ✅ Before final answer | ✅ Ported | **P0** |
+| **Max Iterations (200)** | ✅ Default | ✅ Ported | **P0** |
+| **max_tool_result_chars (400K)** | ✅ | ✅ Ported | **P0** |
+| **SearXNG Override** | ✅ Hardcoded URL | ❌ Not Ported | SKIP |
+| **WhatsApp Channel** | ✅ Enhanced markdown | ❌ Not Ported | SKIP |
+| **Commands (/s, /c, /rerun)** | ✅ 3 new commands | ❌ Not Ported | OPTIONAL |
+| **ExecTool timeout (90s)** | ✅ | ❌ Not Ported | **P1** |
+| **context_window_tokens (200K)** | ✅ | ❌ Not Ported | **P1** |
+| **ReadFileTool limits** | ✅ 768K chars, 8K lines | ❌ Not Ported | **P1** |
+| **_CHAT_RETRY_DELAYS (5 attempts)** | ✅ (1,2,4,8,16) | ❌ Not Ported | **P1** |
+| **Write/Edit char limits** | ✅ Dynamic by max_tokens | ❌ Not Ported | P2 |
+| **web_fetch limit (500K)** | ✅ | ⚠️ 400K (close) | ACCEPT |
+| **Example system prompt** | ✅ medical-research | ❌ Not Ported | **P1** |
+
+---
+
+## Port Priority Recommendations
+
+### **P0 — Already Ported** ✅
+All critical features for comprehensive research are complete:
+- Tiered web fetcher
+- PDF support
+- Force-final threshold
+- Tool summary
+- 200 max iterations
+- 400K tool result size
+
+### **P1 — Should Port** ⚠️
+High-value config updates:
+1. **ExecTool timeout** — 60s → 90s
+2. **_CHAT_RETRY_DELAYS** — (1,2,4) → (1,2,4,8,16)
+3. **context_window_tokens** — Set to 200,000
+4. **ReadFileTool limits** — Add 768K char, 8K line limits
+5. **Copy example system prompt** — For testing
+
+**Estimated Effort:** 2-3 hours
+
+### **P2 — Optional** 💡
+Nice-to-have features:
+1. **Write/Edit char limits** — Dynamic by max_tokens
+2. **web_fetch limit** — 400K → 500K (minor)
+
+**Estimated Effort:** 1-2 hours
+
+### **SKIP — Not Worth Porting** ❌
+Features that don't fit Hermes architecture:
+1. **SearXNG override** — Hermes uses paid search APIs
+2. **WhatsApp channel** — No channel abstraction in Hermes
+3. **Custom commands (/s, /c, /rerun)** — CLI differences
+
+---
+
+## What You Can Do Now
+
+### ✅ Ready for Testing
+Your comprehensive research use case should work:
+
+"Comprehensive research about pneumonia in ER , fetch as least 10 up-to-date, evidence-based and reliable sources or guidelines, make it into .md file in /workspace folder, write 2000 words first then edit for more contents."
+
+**Expected Output:**
+- ✅ ~7000 words
+- ✅ ~50KB size
+- ✅ ~28 tool calls
+- ✅ Structured markdown
+- ✅ Tool summary displayed
+
+---
+
 <p align="center">
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>
