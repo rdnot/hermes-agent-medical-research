@@ -554,7 +554,7 @@ class AIAgent:
         command: str = None,
         args: list[str] | None = None,
         model: str = "",
-        max_iterations: int = 90,  # Default tool-calling iterations (shared with subagents)
+        max_iterations: int = 200,  # Default tool-calling iterations (shared with subagents)
         tool_delay: float = 1.0,
         enabled_toolsets: List[str] = None,
         disabled_toolsets: List[str] = None,
@@ -609,7 +609,7 @@ class AIAgent:
             provider (str): Provider identifier (optional; used for telemetry/routing hints)
             api_mode (str): API mode override: "chat_completions" or "codex_responses"
             model (str): Model name to use (default: "anthropic/claude-opus-4.6")
-            max_iterations (int): Maximum number of tool calling iterations (default: 90)
+            max_iterations (int): Maximum number of tool calling iterations (default: 200)
             tool_delay (float): Delay between tool calls in seconds (default: 1.0)
             enabled_toolsets (List[str]): Only enable tools from these toolsets (optional)
             disabled_toolsets (List[str]): Disable tools from these toolsets (optional)
@@ -1681,6 +1681,42 @@ class AIAgent:
         content = re.sub(r'<REASONING_SCRATCHPAD>.*?</REASONING_SCRATCHPAD>', '', content, flags=re.DOTALL)
         content = re.sub(r'</?(?:think|thinking|reasoning|REASONING_SCRATCHPAD)>\s*', '', content, flags=re.IGNORECASE)
         return content
+
+    def _build_tools_summary(self, tool_calls: List[Dict[str, Any]]) -> str:
+        """
+        Build a summary message showing all tools used in this turn.
+        
+        Format:
+        **Tools used:**
+        - search(query="pneumonia guidelines")
+        - web_fetch(url="https://...")
+        - read_file(path="...")
+        """
+        if not tool_calls:
+            return ""
+        
+        lines = ["**Tools used:**"]
+        for item in tool_calls:
+            name = item.get("name", "unknown")
+            args = item.get("arguments", {})
+            
+            # Format arguments concisely
+            if not args:
+                lines.append(f"- {name}()")
+            else:
+                # Show first 1-2 key arguments
+                arg_parts = []
+                for key, value in list(args.items())[:2]:
+                    if isinstance(value, str) and len(value) > 50:
+                        value = value[:47] + "..."
+                    arg_parts.append(f'{key}="{value}"')
+                
+                if len(args) > 2:
+                    arg_parts.append(f"... +{len(args) - 2} more")
+                
+                lines.append(f"- {name}({', '.join(arg_parts)})")
+        
+        return "\n".join(lines)
 
     def _looks_like_codex_intermediate_ack(
         self,
@@ -7269,6 +7305,15 @@ class AIAgent:
         self._last_content_with_tools = None
         self._mute_post_response = False
         self._unicode_sanitization_passes = 0
+        
+        # ── Tool Call Tracking (for summary display) ─────────────────────
+        # Track all tool calls in this turn for transparency and audit trail.
+        self._current_turn_tool_calls: List[Dict[str, Any]] = []
+        
+        # ── Force-Final Threshold (prevent infinite tool loops) ───────────
+        # When iteration budget reaches this threshold with pending tool calls,
+        # inject a user message forcing the model to provide final answer.
+        self._force_final_threshold = max(1, self.max_iterations - 2)
 
         # Pre-turn connection health check: detect and clean up dead TCP
         # connections left over from provider outages or dropped streams.
@@ -9109,14 +9154,44 @@ class AIAgent:
                 elif hasattr(self, "_codex_incomplete_retries"):
                     self._codex_incomplete_retries = 0
                 
-                # Check for tool calls
-                if assistant_message.tool_calls:
-                    if not self.quiet_mode:
-                        self._vprint(f"{self.log_prefix}🔧 Processing {len(assistant_message.tool_calls)} tool call(s)...")
-                    
-                    if self.verbose_logging:
+                    # Check for tool calls
+                    if assistant_message.tool_calls:
+                        # ── Track Tool Calls (for summary) ────────────────────
+                        # Record all tool calls in this turn for transparency.
                         for tc in assistant_message.tool_calls:
-                            logging.debug(f"Tool call: {tc.function.name} with args: {tc.function.arguments[:200]}...")
+                            try:
+                                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                            except (json.JSONDecodeError, TypeError):
+                                args = {}
+                            self._current_turn_tool_calls.append({
+                                "name": tc.function.name,
+                                "arguments": args,
+                            })
+                        
+                        # ── Force-Final Threshold (prevent infinite loops) ─────
+                        # If we're near the iteration limit and still making tool calls,
+                        # inject a user message forcing the model to synthesize findings.
+                        if api_call_count >= self._force_final_threshold:
+                            self._vprint(f"{self.log_prefix}⚠️  Force-final threshold reached ({api_call_count}/{self.max_iterations}) — requesting final answer...")
+                            # Inject user message to force final synthesis
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "You have gathered sufficient information. For research query, don't use any more tools. "
+                                    "Provide your final comprehensive answer now based on all the information gathered. "
+                                    "Synthesize all findings into a well-structured response."
+                                ),
+                            })
+                            # Execute tools first, then the forced user message will trigger final answer on next turn
+                            if not self.quiet_mode:
+                                self._vprint(f"{self.log_prefix}🔧 Processing {len(assistant_message.tool_calls)} tool call(s)...")
+                        else:
+                            if not self.quiet_mode:
+                                self._vprint(f"{self.log_prefix}🔧 Processing {len(assistant_message.tool_calls)} tool call(s)...")
+                        
+                        if self.verbose_logging:
+                            for tc in assistant_message.tool_calls:
+                                logging.debug(f"Tool call: {tc.function.name} with args: {tc.function.arguments[:200]}...")
                     
                     # Validate tool call names - detect model hallucinations
                     # Repair mismatched tool names before validating
@@ -9524,6 +9599,13 @@ class AIAgent:
                     
                     # Strip <think> blocks from user-facing response (keep raw in messages for trajectory)
                     final_response = self._strip_think_blocks(final_response).strip()
+                    
+                    # ── Tool Summary Display (transparency) ─────────────────
+                    # Show all tools used in this turn before the final answer.
+                    if self._current_turn_tool_calls and not self.quiet_mode:
+                        tool_summary = self._build_tools_summary(self._current_turn_tool_calls)
+                        if tool_summary:
+                            self._safe_print(f"\n{tool_summary}")
                     
                     final_msg = self._build_assistant_message(assistant_message, finish_reason)
 
