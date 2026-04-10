@@ -66,6 +66,35 @@ from tools.website_policy import check_website_access
 logger = logging.getLogger(__name__)
 
 
+# ─── Optional Local Fetcher Dependencies ──────────────────────────────────────
+# These provide free local fallback when cloud APIs are unavailable or fail.
+# Install with: pip install curl_cffi scrapling PyMuPDF trafilatura
+
+try:
+    from curl_cffi import requests as curl_requests
+    HAS_CURL_CPERF = True
+except ImportError:
+    HAS_CURL_CPERF = False
+
+try:
+    from scrapling import AsyncStealthySession
+    HAS_SCRAPLING = True
+except ImportError:
+    HAS_SCRAPLING = False
+
+try:
+    import fitz  # PyMuPDF
+    HAS_PYMUPDF = True
+except ImportError:
+    HAS_PYMUPDF = False
+
+try:
+    import trafilatura
+    HAS_TRAFILATURA = True
+except ImportError:
+    HAS_TRAFILATURA = False
+
+
 # ─── Backend Selection ────────────────────────────────────────────────────────
 
 def _has_env(name: str) -> bool:
@@ -1031,6 +1060,194 @@ async def _parallel_extract(urls: List[str]) -> List[Dict[str, Any]]:
     return results
 
 
+# ─── Tiered Local Fetcher (Free Fallback) ─────────────────────────────────────
+# Tries local fetchers before falling back to cloud APIs.
+# Order: curl_cffi (fast, no browser) → Scrapling (JS/Cloudflare) → httpx (last resort)
+
+def _convert_reddit_url(url: str) -> str:
+    """Convert Reddit URLs to .json API for structured data."""
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(url)
+    if "reddit.com" in parsed.netloc.lower() and not parsed.path.endswith(".json"):
+        new_path = parsed.path.rstrip('/') + '/.json'
+        url = urlunparse(parsed._replace(path=new_path))
+        logger.debug("Converted Reddit URL to JSON API: %s", url)
+    return url
+
+
+def _extract_pdf_text(pdf_data: bytes) -> str:
+    """Extract text from PDF using PyMuPDF."""
+    if not HAS_PYMUPDF:
+        raise ImportError("PyMuPDF not installed. Install with: pip install PyMuPDF")
+    doc = fitz.open(stream=pdf_data, filetype="pdf")
+    text_lines = []
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        text = page.get_text()
+        text_lines.append(f"--- Page {page_num + 1} ---\n{text}")
+    doc.close()
+    return "\n".join(text_lines)
+
+
+def _html_to_text(html: str, url: str = "") -> str:
+    """Extract readable text from HTML using trafilatura."""
+    if not HAS_TRAFILATURA:
+        # Fallback: strip HTML tags
+        import re
+        text = re.sub(r'<[^>]+>', '', html)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+    # Use trafilatura for better extraction
+    text = trafilatura.extract(html, url=url, include_comments=False)
+    return text or html
+
+
+async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, str]:
+    """
+    Fetch URL content using tiered strategy.
+    
+    Returns:
+        (content_bytes, headers_dict, content_type_str)
+    
+    Raises:
+        Exception if all fetchers fail.
+    """
+    import httpx
+    
+    # Convert Reddit URLs to JSON API
+    url = _convert_reddit_url(url)
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    }
+    
+    # Tier 1: curl_cffi (fast, Chrome TLS impersonation)
+    if HAS_CURL_CPERF:
+        try:
+            logger.debug("Fetching with curl_cffi: %s", url)
+            resp = curl_requests.get(url, headers=headers, timeout=timeout, impersonate="chrome120")
+            if resp.status_code == 200:
+                content_type = resp.headers.get("content-type", "text/html")
+                return resp.content, dict(resp.headers), content_type
+            logger.debug("curl_cffi returned status %d", resp.status_code)
+        except Exception as e:
+            logger.debug("curl_cffi failed: %s", e)
+    
+    # Tier 2: Scrapling (Playwright-based, handles JS/Cloudflare)
+    if HAS_SCRAPLING:
+        try:
+            logger.debug("Fetching with Scrapling: %s", url)
+            async with AsyncStealthySession() as session:
+                async with session.get(url, headers=headers, timeout=timeout) as resp:
+                    if resp.status == 200:
+                        content = await resp.read()
+                        content_type = resp.headers.get("content-type", "text/html")
+                        return content, dict(resp.headers), content_type
+                    logger.debug("Scrapling returned status %d", resp.status)
+        except Exception as e:
+            logger.debug("Scrapling failed: %s", e)
+    
+    # Tier 3: httpx (last resort)
+    try:
+        logger.debug("Fetching with httpx: %s", url)
+        async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
+            resp = await client.get(url, timeout=timeout)
+            if resp.status_code == 200:
+                content_type = resp.headers.get("content-type", "text/html")
+                return resp.content, dict(resp.headers), content_type
+            logger.debug("httpx returned status %d", resp.status_code)
+    except Exception as e:
+        logger.debug("httpx failed: %s", e)
+    
+    raise Exception(f"All local fetchers failed for {url}")
+
+
+async def _fetch_and_process_locally(url: str, timeout: int = 60) -> Optional[Dict[str, Any]]:
+    """
+    Fetch URL using tiered local fetchers and process content.
+    
+    Returns:
+        Dict with url, title, content, raw_content, metadata
+        OR None if local fetch should fall back to cloud API.
+    
+    Raises:
+        Exception if fetch succeeds but processing fails.
+    """
+    try:
+        content_bytes, headers, content_type = await _fetch_raw(url, timeout)
+    except Exception as e:
+        logger.debug("Local fetch failed for %s: %s", url, e)
+        return None  # Signal to fall back to cloud API
+    
+    # Handle PDF
+    if "application/pdf" in content_type or url.lower().endswith(".pdf"):
+        try:
+            text = _extract_pdf_text(content_bytes)
+            return {
+                "url": url,
+                "title": f"PDF: {url.split('/')[-1]}",
+                "content": text,
+                "raw_content": text,
+                "metadata": {"sourceURL": url, "content_type": "application/pdf"},
+            }
+        except Exception as e:
+            logger.warning("PDF extraction failed for %s: %s", url, e)
+            return {
+                "url": url,
+                "title": "",
+                "content": "",
+                "error": f"PDF extraction failed: {e}",
+                "metadata": {"sourceURL": url},
+            }
+    
+    # Handle images (for vision models - return base64)
+    if content_type.startswith("image/"):
+        import base64
+        base64_img = base64.b64encode(content_bytes).decode("utf-8")
+        return {
+            "url": url,
+            "title": f"Image: {url.split('/')[-1]}",
+            "content": f"![Image]({url})",
+            "raw_content": f"data:{content_type};base64,{base64_img}",
+            "metadata": {"sourceURL": url, "content_type": content_type, "is_image": True},
+        }
+    
+    # Handle HTML/text
+    try:
+        html = content_bytes.decode("utf-8", errors="replace")
+    except Exception as e:
+        logger.warning("Failed to decode content for %s: %s", url, e)
+        return None
+    
+    # Extract title
+    title = ""
+    title_match = re.search(r'<title[^>]*>([^<]+)</title>', html, re.IGNORECASE)
+    if title_match:
+        title = title_match.group(1).strip()
+    
+    # Extract readable text
+    text = _html_to_text(html, url)
+    
+    # Smart truncation (paragraph-aware)
+    max_chars = 400000  # Match hermes max_tool_result_chars
+    if len(text) > max_chars:
+        # Truncate at paragraph boundary
+        truncated = text[:max_chars]
+        last_para_end = max(truncated.rfind('\n\n'), truncated.rfind('\r\n\r\n'))
+        if last_para_end > max_chars * 0.9:  # Only if we're close to the limit
+            text = truncated[:last_para_end] + "\n\n[...truncated...]"
+    
+    return {
+        "url": url,
+        "title": title,
+        "content": text,
+        "raw_content": text,
+        "metadata": {"sourceURL": url, "content_type": content_type},
+    }
+
+
 def web_search_tool(query: str, limit: int = 5) -> str:
     """
     Search the web for information using available search API backend.
@@ -1285,7 +1502,26 @@ async def web_extract_tool(
                         continue
 
                     try:
-                        logger.info("Scraping: %s", url)
+                        # ── Try Local Fetch First (Free Fallback) ──────────────
+                        # Attempt tiered local fetchers before using paid Firecrawl API.
+                        # Local fetch returns None if it should fall back to cloud API.
+                        logger.info("Fetching: %s", url)
+                        local_result = await _fetch_and_process_locally(url, timeout=60)
+                        
+                        if local_result is not None:
+                            # Local fetch succeeded — use result
+                            logger.info("Local fetch succeeded for %s", url)
+                            if "error" in local_result:
+                                # Local fetch had an error (e.g., PDF extraction failed)
+                                results.append(local_result)
+                                continue
+                            results.append(local_result)
+                            continue
+                        
+                        # Local fetch returned None — fall back to Firecrawl API
+                        logger.debug("Local fetch returned None, falling back to Firecrawl API for %s", url)
+                        
+                        # ── Firecrawl extraction (Cloud API Fallback) ───────────
                         # Run synchronous Firecrawl scrape in a thread with a
                         # 60s timeout so a hung fetch doesn't block the session.
                         try:
