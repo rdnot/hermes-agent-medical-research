@@ -64,7 +64,7 @@ Features that don't fit Hermes architecture:
 - **Local Extraction Backend**: Added support for configuring a `local` extract backend (`web.extract_backend: local`) to bypass cloud extraction entirely.
 - **PDF & HTML Processing**: Integrated `PyMuPDF` for direct PDF text extraction and `trafilatura` for clean HTML-to-text parsing.
 - **Reddit SPA Handling**: Disabled `.json` auto-conversion and bypassed `curl_cffi` for Reddit URLs, routing them directly to `Scrapling` to properly render the JS-heavy frontend.
-- **Increased Output Cap**: Increased `MAX_OUTPUT_SIZE` of LLM-summarized web fetch output (for pages where raw content > 5,000 characters) from `5000` → `10000` characters.
+- **Disabled Single-Pass LLM Summarization for 500–500K Range:** Removed single-pass LLM summarization for pages where raw content is 5000–500,000 characters. These now return raw extracted text directly, avoiding timeout and information loss from stuffing entire documents into one summarizer prompt. Documents >500K chars still use chunked LLM summarization. MAX_OUTPUT_SIZE increase from 5000 to 10,000 characters for summarized content.
 
 ### Agent Configuration (`run_agent.py`)
 - **Expanded Iteration Budget**: Increased default `max_iterations` limit from `90` to `200` to support deep, comprehensive research without premature cutoff.
