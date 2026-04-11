@@ -121,19 +121,6 @@ def _get_backend() -> str:
     if configured in ("parallel", "firecrawl", "tavily", "exa"):
         return configured
 
-def _get_extract_backend() -> str:
-    """Determine which web EXTRACT backend to use.
-
-    Reads ``web.extract_backend`` from config.yaml.
-    Allows separate backend for extract vs search (e.g. tavily for search,
-    local for extract). Falls back to ``web.backend`` if not set.
-    Valid values: "local", "parallel", "firecrawl", "tavily", "exa"
-    """
-    configured = (_load_web_config().get("extract_backend") or "").lower().strip()
-    if configured in ("local", "parallel", "firecrawl", "tavily", "exa"):
-        return configured
-    return _get_backend()
-
     # Fallback for manual / legacy config — pick the highest-priority
     # available backend. Firecrawl also counts as available when the managed
     # tool gateway is configured for Nous subscribers.
@@ -148,6 +135,20 @@ def _get_extract_backend() -> str:
             return backend
 
     return "firecrawl"  # default (backward compat)
+
+
+def _get_extract_backend() -> str:
+    """Determine which web EXTRACT backend to use.
+
+    Reads ``web.extract_backend`` from config.yaml.
+    Allows separate backend for extract vs search (e.g. tavily for search,
+    local for extract). Falls back to ``web.backend`` if not set.
+    Valid values: "local", "parallel", "firecrawl", "tavily", "exa"
+    """
+    configured = (_load_web_config().get("extract_backend") or "").lower().strip()
+    if configured in ("local", "parallel", "firecrawl", "tavily", "exa"):
+        return configured
+    return _get_backend()
 
 
 def _is_backend_available(backend: str) -> bool:
