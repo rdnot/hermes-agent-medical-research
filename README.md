@@ -58,18 +58,20 @@ Features that don't fit Hermes architecture:
 
 ---
 
-## What You Can Do Now
+## Fork changes
+- **Web tools** (`tools/web_tools.py`) : Increased `MAX_OUTPUT_SIZE` of LLM-summarized web fetch output (for pages where raw content > 5,000 characters) in `tools/web_tools.py` from `5000` → `10000` characters.
 
-tell Hermes to : set web.backend to tavily , and set the api key in env (or other web search services, or even tell Hermes to install and set up local searxng for free local websearch)
-tell Hermes to : set web.extract_backend to local (curl_cffi/scrapling + trafilatura)
+## What You Can Do Now (setting up for medical research)
+- **Tell Hermes to** : set web.backend to tavily , and set the api key in env (or other web search services, or even tell Hermes to install and set up local searxng for free local websearch)
+- **Tell Hermes to** : set web.extract_backend to local (curl_cffi/scrapling + trafilatura)
 [or set in config yourself]
 ```
 web:
   backend: tavily
   extract_backend: local
 ```
-tell Hermes to : install required dependencies (curl_cffi, scrapling, trafilatura, PyMuPDF(optional))
-tell Hermes to : test web search service and local web extraction function
+- **Tell Hermes to** : install required dependencies (curl_cffi, scrapling, trafilatura, PyMuPDF(optional))
+- **Tell Hermes to** : test web search service and local web extraction function
 
 ### ✅ Ready for Testing
 Your comprehensive research use case should work:
