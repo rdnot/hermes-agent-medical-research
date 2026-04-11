@@ -1465,7 +1465,18 @@ class GatewayRunner:
                 logger.info("Recovered %s background process(es) from previous run", recovered)
         except Exception as e:
             logger.warning("Process checkpoint recovery: %s", e)
-        
+
+        # Suspend sessions that were active when the gateway last exited.
+        # This prevents stuck sessions from being blindly resumed on restart,
+        # which can create an unrecoverable loop (#7536).  Suspended sessions
+        # auto-reset on the next incoming message, giving the user a clean start.
+        try:
+            suspended = self.session_store.suspend_recently_active()
+            if suspended:
+                logger.info("Suspended %d in-flight session(s) from previous run", suspended)
+        except Exception as e:
+            logger.warning("Session suspension on startup failed: %s", e)
+
         connected_count = 0
         enabled_platform_count = 0
         startup_nonretryable_errors: list[str] = []
@@ -2221,6 +2232,13 @@ class GatewayRunner:
         # are system-generated and must skip user authorization.
         if getattr(event, "internal", False):
             pass
+        elif source.user_id is None:
+            # Messages with no user identity (Telegram service messages,
+            # channel forwards, anonymous admin actions) cannot be
+            # authorized — drop silently instead of triggering the pairing
+            # flow with a None user_id.
+            logger.debug("Ignoring message with no user_id from %s", source.platform.value)
+            return None
         elif not self._is_user_authorized(source):
             logger.warning("Unauthorized user: %s (%s) on %s", source.user_id, source.user_name, source.platform.value)
             # In DMs: offer pairing code. In groups: silently ignore.
@@ -2370,8 +2388,11 @@ class GatewayRunner:
                 self._pending_messages.pop(_quick_key, None)
                 if _quick_key in self._running_agents:
                     del self._running_agents[_quick_key]
-                logger.info("HARD STOP for session %s — session lock released", _quick_key[:20])
-                return "⚡ Force-stopped. The session is unlocked — you can send a new message."
+                # Mark session suspended so the next message starts fresh
+                # instead of resuming the stuck context (#7536).
+                self.session_store.suspend_session(_quick_key)
+                logger.info("HARD STOP for session %s — suspended, session lock released", _quick_key[:20])
+                return "⚡ Force-stopped. The session is suspended — your next message will start fresh."
 
             # /reset and /new must bypass the running-agent guard so they
             # actually dispatch as commands instead of being queued as user
@@ -2805,7 +2826,9 @@ class GatewayRunner:
         # so the agent knows this is a fresh conversation (not an intentional /reset).
         if getattr(session_entry, 'was_auto_reset', False):
             reset_reason = getattr(session_entry, 'auto_reset_reason', None) or 'idle'
-            if reset_reason == "daily":
+            if reset_reason == "suspended":
+                context_note = "[System note: The user's previous session was stopped and suspended. This is a fresh conversation with no prior context.]"
+            elif reset_reason == "daily":
                 context_note = "[System note: The user's session was automatically reset by the daily schedule. This is a fresh conversation with no prior context.]"
             else:
                 context_note = "[System note: The user's previous session expired due to inactivity. This is a fresh conversation with no prior context.]"
@@ -2822,7 +2845,9 @@ class GatewayRunner:
                 )
                 platform_name = source.platform.value if source.platform else ""
                 had_activity = getattr(session_entry, 'reset_had_activity', False)
-                should_notify = (
+                # Suspended sessions always notify (they were explicitly stopped
+                # or crashed mid-operation) — skip the policy check.
+                should_notify = reset_reason == "suspended" or (
                     policy.notify
                     and had_activity
                     and platform_name not in policy.notify_exclude_platforms
@@ -2830,7 +2855,9 @@ class GatewayRunner:
                 if should_notify:
                     adapter = self.adapters.get(source.platform)
                     if adapter:
-                        if reset_reason == "daily":
+                        if reset_reason == "suspended":
+                            reason_text = "previous session was stopped or interrupted"
+                        elif reset_reason == "daily":
                             reason_text = f"daily schedule at {policy.at_hour}:00"
                         else:
                             hours = policy.idle_minutes // 60
@@ -3913,25 +3940,31 @@ class GatewayRunner:
         handles /stop before this method is reached.  This handler fires
         only through normal command dispatch (no running agent) or as a
         fallback.  Force-clean the session lock in all cases for safety.
+
+        When there IS a running/pending agent, the session is also marked
+        as *suspended* so the next message starts a fresh session instead
+        of resuming the stuck context (#7536).
         """
         source = event.source
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
-        
+
         agent = self._running_agents.get(session_key)
         if agent is _AGENT_PENDING_SENTINEL:
             # Force-clean the sentinel so the session is unlocked.
             if session_key in self._running_agents:
                 del self._running_agents[session_key]
-            logger.info("HARD STOP (pending) for session %s — sentinel cleared", session_key[:20])
-            return "⚡ Force-stopped. The agent was still starting — session unlocked."
+            self.session_store.suspend_session(session_key)
+            logger.info("HARD STOP (pending) for session %s — suspended, sentinel cleared", session_key[:20])
+            return "⚡ Force-stopped. The agent was still starting — your next message will start fresh."
         if agent:
             agent.interrupt("Stop requested")
             # Force-clean the session lock so a truly hung agent doesn't
             # keep it locked forever.
             if session_key in self._running_agents:
                 del self._running_agents[session_key]
-            return "⚡ Force-stopped. The session is unlocked — you can send a new message."
+            self.session_store.suspend_session(session_key)
+            return "⚡ Force-stopped. Your next message will start a fresh session."
         else:
             return "No active task to stop."
 
@@ -6597,6 +6630,8 @@ class GatewayRunner:
             chat_id=context.source.chat_id,
             chat_name=context.source.chat_name or "",
             thread_id=str(context.source.thread_id) if context.source.thread_id else "",
+            user_id=str(context.source.user_id) if context.source.user_id else "",
+            user_name=str(context.source.user_name) if context.source.user_name else "",
         )
 
     def _clear_session_env(self, tokens: list) -> None:
@@ -6809,6 +6844,8 @@ class GatewayRunner:
         platform_name = watcher.get("platform", "")
         chat_id = watcher.get("chat_id", "")
         thread_id = watcher.get("thread_id", "")
+        user_id = watcher.get("user_id", "")
+        user_name = watcher.get("user_name", "")
         agent_notify = watcher.get("notify_on_complete", False)
         notify_mode = self._load_background_notifications_mode()
 
@@ -6864,6 +6901,8 @@ class GatewayRunner:
                                 platform=_platform_enum,
                                 chat_id=chat_id,
                                 thread_id=thread_id or None,
+                                user_id=user_id or None,
+                                user_name=user_name or None,
                             )
                             synth_event = MessageEvent(
                                 text=synth_text,
