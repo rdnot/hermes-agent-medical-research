@@ -1,6 +1,6 @@
 # Nanobot Medical Research Fork → Hermes-Agent Medical Research Fork Port Status
 
-**Date:** 2026-04-11 04:45 UTC+07:00
+**Date:** 2026-04-12 00:48 UTC+07:00
 
 ## Detailed Comparison Table
 
@@ -45,14 +45,10 @@ High-value config updates:
 4. **ReadFileTool limits** — Add 768K char, 8K line limits
 5. **Copy example system prompt** — For testing
 
-**Estimated Effort:** 2-3 hours
-
 ### **P2 — Optional** 💡
 Nice-to-have features:
 1. **Write/Edit char limits** — Dynamic by max_tokens
 2. **web_fetch limit** — 400K → 500K (minor)
-
-**Estimated Effort:** 1-2 hours
 
 ### **SKIP — Not Worth Porting** ❌
 Features that don't fit Hermes architecture:
@@ -63,6 +59,17 @@ Features that don't fit Hermes architecture:
 ---
 
 ## What You Can Do Now
+
+tell Hermes to : set web.backend to tavily , and set the api key in env (or other web search services, or even tell Hermes to install and set up local searxng for free local websearch)
+tell Hermes to : set web.extract_backend to local (curl_cffi/scrapling + trafilatura)
+[or set in config yourself]
+```
+web:
+  backend: tavily
+  extract_backend: local
+```
+tell Hermes to : install required dependencies (curl_cffi, scrapling, trafilatura, PyMuPDF(optional))
+tell Hermes to : test web search service and local web extraction function
 
 ### ✅ Ready for Testing
 Your comprehensive research use case should work:
