@@ -77,7 +77,7 @@ except ImportError:
     HAS_CURL_CPERF = False
 
 try:
-    from scrapling import AsyncStealthySession
+    from scrapling.engines._browsers._stealth import AsyncStealthySession
     HAS_SCRAPLING = True
 except ImportError:
     HAS_SCRAPLING = False
@@ -1127,8 +1127,8 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, str]:
     """
     import httpx
     
-    # Convert Reddit URLs to JSON API
-    url = _convert_reddit_url(url)
+    # Skip Reddit JSON conversion — scrapling will fetch the rendered HTML page
+    # url = _convert_reddit_url(url)
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -1136,8 +1136,8 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, str]:
         "Accept-Language": "en-US,en;q=0.5",
     }
     
-    # Tier 1: curl_cffi (fast, Chrome TLS impersonation)
-    if HAS_CURL_CPERF:
+    # Tier 1: curl_cffi (fast, Chrome TLS impersonation) — skip for Reddit (JS-heavy SPA)
+    if HAS_CURL_CPERF and "reddit.com" not in url.lower():
         try:
             logger.debug("Fetching with curl_cffi: %s", url)
             resp = curl_requests.get(url, headers=headers, timeout=timeout, impersonate="chrome120")
@@ -1152,13 +1152,17 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, str]:
     if HAS_SCRAPLING:
         try:
             logger.debug("Fetching with Scrapling: %s", url)
-            async with AsyncStealthySession() as session:
-                async with session.get(url, headers=headers, timeout=timeout) as resp:
-                    if resp.status == 200:
-                        content = await resp.read()
-                        content_type = resp.headers.get("content-type", "text/html")
-                        return content, dict(resp.headers), content_type
-                    logger.debug("Scrapling returned status %d", resp.status)
+            session = AsyncStealthySession()
+            await session.start()
+            try:
+                resp = await session.fetch(url, timeout_ms=timeout * 1000)
+                if resp.status == 200:
+                    content = resp.body
+                    content_type = resp.headers.get("content-type", "text/html") if resp.headers else "text/html"
+                    return content, dict(resp.headers or {}), content_type
+                logger.debug("Scrapling returned status %d", resp.status)
+            finally:
+                await session.close()
         except Exception as e:
             logger.debug("Scrapling failed: %s", e)
     
