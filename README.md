@@ -72,7 +72,7 @@ Features that don't fit Hermes architecture:
 - **Tool Summary Display**: Added a transparency feature that tracks and clearly lists all tool calls and their arguments (e.g., `search()`, `web_fetch()`) made during a turn right before outputting the final response.
 
 ### Budget & Storage Config (`tools/budget_config.py`)
-- **Increased Context Allowance**: Quadrupled `DEFAULT_RESULT_SIZE_CHARS` from `100,000` to `400,000` characters to handle massive text payloads from heavy medical research data.
+- **Increased Context Allowance**: Increased `DEFAULT_RESULT_SIZE_CHARS` from `100,000` to `400,000` characters and DEFAULT_TURN_BUDGET_CHARS from `100,000` to `500,000` characters to handle massive text payloads from heavy medical research data.
 
 ## What You Can Do Now (setting up for medical research)
 - **Tell Hermes to** : set SOUL.md to
