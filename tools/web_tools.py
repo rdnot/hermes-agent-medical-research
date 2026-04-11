@@ -120,6 +120,19 @@ def _get_backend() -> str:
     if configured in ("parallel", "firecrawl", "tavily", "exa"):
         return configured
 
+def _get_extract_backend() -> str:
+    """Determine which web EXTRACT backend to use.
+
+    Reads ``web.extract_backend`` from config.yaml.
+    Allows separate backend for extract vs search (e.g. tavily for search,
+    local for extract). Falls back to ``web.backend`` if not set.
+    Valid values: "local", "parallel", "firecrawl", "tavily", "exa"
+    """
+    configured = (_load_web_config().get("extract_backend") or "").lower().strip()
+    if configured in ("local", "parallel", "firecrawl", "tavily", "exa"):
+        return configured
+    return _get_backend()
+
     # Fallback for manual / legacy config — pick the highest-priority
     # available backend. Firecrawl also counts as available when the managed
     # tool gateway is configured for Nous subscribers.
@@ -1455,9 +1468,22 @@ async def web_extract_tool(
         if not safe_urls:
             results = []
         else:
-            backend = _get_backend()
+            backend = _get_extract_backend()
 
-            if backend == "parallel":
+            if backend == "local":
+                # ── Local-only extraction (curl_cffi + trafilatura) ─────────
+                # No cloud API needed. Falls back to httpx if curl_cffi fails.
+                results = []
+                for url in safe_urls:
+                    try:
+                        local_result = await _fetch_and_process_locally(url, timeout=60)
+                        if local_result is not None:
+                            results.append(local_result)
+                        else:
+                            results.append({"url": url, "title": "", "content": "", "error": "Local fetch failed — all local fetchers exhausted"})
+                    except Exception as e:
+                        results.append({"url": url, "title": "", "content": "", "error": f"Local fetch error: {e}"})
+            elif backend == "parallel":
                 results = await _parallel_extract(safe_urls)
             elif backend == "exa":
                 results = _exa_extract(safe_urls)
