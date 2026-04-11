@@ -530,6 +530,8 @@ async def process_content_with_llm(
     to intelligently extract key information and create markdown summaries,
     significantly reducing token usage while preserving all important information.
     
+    Content below min_length (5000 chars) returns as-is (no processing).
+    Content 5000–500K chars returns as raw text (LLM summarization disabled).
     For very large content (>500k chars), uses chunked processing with synthesis.
     For extremely large content (>2M chars), refuses to process entirely.
     
@@ -578,22 +580,18 @@ async def process_content_with_llm(
                 content, context_str, model, CHUNK_SIZE, MAX_OUTPUT_SIZE
             )
         
-        # Standard single-pass processing for normal content
-        logger.info("Processing content with LLM (%d characters)", content_len)
-        
-        processed_content = await _call_summarizer_llm(content, context_str, model)
-        
-        if processed_content:
-            # Enforce output cap
-            if len(processed_content) > MAX_OUTPUT_SIZE:
-                processed_content = processed_content[:MAX_OUTPUT_SIZE] + "\n\n[... summary truncated for context management ...]"
-            
-            # Log compression metrics
-            processed_length = len(processed_content)
-            compression_ratio = processed_length / content_len if content_len > 0 else 1.0
-            logger.info("Content processed: %d -> %d chars (%.1f%%)", content_len, processed_length, compression_ratio * 100)
-        
-        return processed_content
+        # LLM summarization disabled for 5000–500K range (single-pass was too
+        # aggressive — stuffed entire docs into one prompt, caused timeouts and
+        # massive information loss).  Content in this range returns as raw text;
+        # callers truncate to budget limits.  Documents >500K still use chunked
+        # processing.  Re-enable by reverting this block and restoring the
+        # _call_summarizer_llm call.
+        logger.info(
+            "LLM summarization disabled for %d-char content (5000–500K range). "
+            "Returning raw text; callers truncate to budget.",
+            content_len,
+        )
+        return None
         
     except Exception as e:
         logger.warning(
@@ -2330,7 +2328,7 @@ WEB_SEARCH_SCHEMA = {
 
 WEB_EXTRACT_SCHEMA = {
     "name": "web_extract",
-    "description": "Extract content from web page URLs. Returns page content in markdown format. Also works with PDF URLs (arxiv papers, documents, etc.) — pass the PDF link directly and it converts to markdown text. Pages under 5000 chars return full markdown; larger pages are LLM-summarized and capped at ~5000 chars per page. Pages over 2M chars are refused. If a URL fails or times out, use the browser tool to access it instead.",
+    "description": "Extract content from web page URLs. Returns page content in markdown format. Also works with PDF URLs (arxiv papers, documents, etc.) — pass the PDF link directly and it converts to markdown text. Pages under 5000 chars return full markdown; larger pages return raw extracted text (LLM summarization disabled). Documents over 500K chars use chunked LLM summarization. Pages over 2M chars are refused. If a URL fails or times out, use the browser tool to access it instead.",
     "parameters": {
         "type": "object",
         "properties": {
