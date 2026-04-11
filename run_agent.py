@@ -9838,7 +9838,7 @@ class AIAgent:
 
                     # ── Tool Summary Display (transparency) ─────────────────
                     # Show all tools used in this turn before the final answer.
-                    if self._current_turn_tool_calls and not self.quiet_mode:
+                    if self._current_turn_tool_calls:
                         tool_summary = self._build_tools_summary(self._current_turn_tool_calls)
                         if tool_summary:
                             self._safe_print(f"\n{tool_summary}")
