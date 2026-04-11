@@ -58,8 +58,21 @@ Features that don't fit Hermes architecture:
 
 ---
 
-## Fork changes
-- **Web tools** (`tools/web_tools.py`) : Increased `MAX_OUTPUT_SIZE` of LLM-summarized web fetch output (for pages where raw content > 5,000 characters) in `tools/web_tools.py` from `5000` → `10000` characters.
+## All Fork changes
+### Web Tools (`tools/web_tools.py`)
+- **Tiered Local Fetcher (Free Fallback)**: Added a local scraping fallback that attempts to fetch pages using `curl_cffi` (Chrome impersonation), then `Scrapling` (Playwright-based for JS/Cloudflare), and finally `httpx` before resorting to paid cloud APIs like Firecrawl.
+- **Local Extraction Backend**: Added support for configuring a `local` extract backend (`web.extract_backend: local`) to bypass cloud extraction entirely.
+- **PDF & HTML Processing**: Integrated `PyMuPDF` for direct PDF text extraction and `trafilatura` for clean HTML-to-text parsing.
+- **Reddit SPA Handling**: Disabled `.json` auto-conversion and bypassed `curl_cffi` for Reddit URLs, routing them directly to `Scrapling` to properly render the JS-heavy frontend.
+- **Increased Output Cap**: Increased `MAX_OUTPUT_SIZE` of LLM-summarized web fetch output (for pages where raw content > 5,000 characters) from `5000` → `10000` characters.
+
+### Agent Configuration (`run_agent.py`)
+- **Expanded Iteration Budget**: Increased default `max_iterations` limit from `90` to `200` to support deep, comprehensive research without premature cutoff.
+- **Force-Final Threshold**: Implemented a safety mechanism (`max_iterations - 2`) that automatically injects a prompt instructing the model to stop using tools and synthesize its final answer to prevent infinite tool loops.
+- **Tool Summary Display**: Added a transparency feature that tracks and clearly lists all tool calls and their arguments (e.g., `search()`, `web_fetch()`) made during a turn right before outputting the final response.
+
+### Budget & Storage Config (`tools/budget_config.py`)
+- **Increased Context Allowance**: Quadrupled `DEFAULT_RESULT_SIZE_CHARS` from `100,000` to `400,000` characters to handle massive text payloads from heavy medical research data.
 
 ## What You Can Do Now (setting up for medical research)
 - **Tell Hermes to** : set SOUL.md to
