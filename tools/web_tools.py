@@ -1235,6 +1235,86 @@ def _extract_pdf_text(pdf_data: bytes) -> str:
     return "\n".join(text_lines)
 
 
+def _is_content_sufficient(content_bytes: bytes, url: str) -> bool:
+    """
+    Returns False if we got a JS shell → escalate to Scrapling browser.
+    Tuned on real Reddit HTML (Feb 2026).
+    """
+    try:
+        raw = content_bytes.decode("utf-8", errors="replace").lower()
+    except Exception:
+        return True
+
+    # Real rendered pages are significantly larger than shells
+    if len(raw) < 8000:
+        return False
+
+    # Generic JS-shell signals (framework-agnostic)
+    if '<div id="root"></div>' in raw or '<div id="app"></div>' in raw:
+        return False
+    if any(sig in raw for sig in ["enable javascript", "requires javascript", "javascript is required"]):
+        return False
+
+    if "reddit.com" in url.lower():
+        # Strong positive markers of real content
+        if any(m in raw for m in [
+            "shreddit-app",            # root component
+            "shreddit-post",           # post body
+            "shreddit-comment",        # crucial for threads
+            "shreddit-comment-tree",   # comment container
+            "faceplate-tracker",       # engagement tracker (only in real render)
+            'data-testid="post-content"',
+        ]):
+            return True
+
+        # Edge-case: old Reddit structure without new components = shell
+        if 'id="comment-tree"' in raw and "shreddit-comment" not in raw:
+            return False
+
+    if "bbc.com" in url.lower() or "bbc.co.uk" in url.lower():
+        # BBC SSR sends real HTML but article body is lazy-loaded via XHR.
+        has_article_body = any(m in raw for m in [
+            'data-component="text-block"',        # article body paragraphs
+            'data-testid="article-body"',         # newer layout
+            '"articleBody"',                      # JSON-LD structured data
+            'data-e2e="article-body"',            # sport/live pages
+            'data-testid="live-post"',            # live blog post block
+            'data-component="livepost"',          # live blog component
+            'data-component="liveblog"',          # live blog wrapper
+            'data-testid="liveblog"',             # live blog testid
+            'data-post-id=',                      # individual live blog post
+            'data-testid="lx-stream-post"',       # live experience stream post
+            'data-e2e="lx-stream-post"',          # live experience stream post (alt)
+            '"liveblogposting"',                  # JSON-LD LiveBlogPosting type
+        ])
+        if not has_article_body:
+            return False
+
+    return True
+
+
+def _is_cloudflare_protected(status: int | None, content: bytes | None) -> bool:
+    """
+    Detect if curl_cffi hit a solvable Cloudflare challenge page.
+    Only returns True for actual CF interstitial/Turnstile pages — NOT bare 403s.
+    A bare 403 (e.g. GameStop Bot Fight Mode) has no challenge to solve,
+    so solve_cloudflare=True would waste time and still fail.
+    """
+    if not content:
+        return False
+    try:
+        snippet = content[:8000].decode("utf-8", errors="replace").lower()
+        return any(m in snippet for m in [
+            "just a moment",            # CF interstitial spinner
+            "cf-browser-verification",  # CF challenge form
+            "checking your browser",    # CF spinner text
+            "cf_chl_opt",               # CF challenge JS variable
+            "challenge-platform",       # CF challenge platform
+        ])
+    except Exception:
+        return False
+
+
 def _html_to_text(html: str, url: str = "") -> str:
     """Extract readable text from HTML using trafilatura."""
     if not HAS_TRAFILATURA:
@@ -1248,76 +1328,100 @@ def _html_to_text(html: str, url: str = "") -> str:
     return text or html
 
 
-async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, str]:
+async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str]:
     """
-    Fetch URL content using tiered strategy.
-    
-    Returns:
-        (content_bytes, headers_dict, content_type_str)
-    
-    Raises:
-        Exception if all fetchers fail.
+    Fetch URL bytes with tiered fallback strategy:
+      1. curl_cffi           — Chrome TLS impersonation, fast, no browser
+                               (skipped for Reddit — always needs real browser)
+      2. AsyncStealthySession — stealth Playwright (Patchright), handles JS-rendered
+                                pages: Reddit comments, Cloudflare, heavy SPAs.
+                                solve_cloudflare auto-enabled when CF detected.
+      3. httpx               — last resort, no stealth
+
+    Returns (content_bytes, headers_dict, status_code, fetcher_name)
     """
     import httpx
 
-    # Track original URL before any conversion (for return value)
-    original_url = url
+    is_reddit = "reddit.com" in url.lower()
 
     # Convert Reddit URLs to .json API — scrapling fetches the JSON endpoint directly
     # curl_cffi tier is skipped for Reddit entirely (see below)
-    is_reddit = "reddit.com" in url.lower()
     if is_reddit:
         url = _convert_reddit_url(url)
-        logger.debug("Reddit: fetching JSON API endpoint via scrapling: %s", url)
+        logger.debug("Reddit: fetching JSON API endpoint: %s", url)
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-    }
+    # PubMed blocks curl_cffi and httpx with reCAPTCHA — skip curl_cffi, go straight to Scrapling
+    is_pubmed = "pubmed.ncbi.nlm.nih.gov" in url.lower()
+    if is_pubmed:
+        logger.debug("PubMed detected — skipping curl_cffi, routing through Scrapling")
 
-    # Tier 1: curl_cffi (fast, Chrome TLS impersonation) — skip for Reddit (JS-heavy SPA)
-    if HAS_CURL_CPERF and not is_reddit:
+    curl_cffi_status: int | None = None
+    curl_cffi_content: bytes | None = None
+
+    # ── Tier 1: curl_cffi (Chrome TLS fingerprint, fast, no browser) ──────
+    # Skipped for Reddit (JS shell / "prove you are human") and PubMed (reCAPTCHA)
+    if HAS_CURL_CPERF and not is_reddit and not is_pubmed:
         try:
             logger.debug("Fetching with curl_cffi: %s", url)
-            resp = curl_requests.get(url, headers=headers, timeout=timeout, impersonate="chrome120")
-            if resp.status_code == 200:
+            resp = curl_requests.get(url, timeout=timeout, impersonate="chrome120")
+            curl_cffi_status = resp.status_code
+            curl_cffi_content = resp.content
+            if resp.status_code < 400 and _is_content_sufficient(resp.content, url):
                 content_type = resp.headers.get("content-type", "text/html")
-                return resp.content, dict(resp.headers), content_type
-            logger.debug("curl_cffi returned status %d", resp.status_code)
+                return resp.content, dict(resp.headers), resp.status_code, "curl_cffi"
+            # status >= 400 or JS shell → fall through to browser tier
+            logger.debug("curl_cffi: status=%d, content insufficient → escalating", resp.status_code)
         except Exception as e:
             logger.debug("curl_cffi failed: %s", e)
-    
-    # Tier 2: Scrapling (Playwright-based, handles JS/Cloudflare)
+
+    # ── Tier 2: Scrapling (Playwright-based, handles JS/Cloudflare) ───────
     if HAS_SCRAPLING:
         try:
-            logger.debug("Fetching with Scrapling: %s", url)
-            session = AsyncStealthySession()
+            solve_cf = _is_cloudflare_protected(curl_cffi_status, curl_cffi_content)
+            if solve_cf:
+                logger.debug("Cloudflare detected → enabling solve_cloudflare")
+            logger.debug("Fetching with Scrapling: %s (cf_solve=%s)", url, solve_cf)
+
+            session = AsyncStealthySession(
+                headless=True,
+                solve_cloudflare=solve_cf,
+            )
             await session.start()
             try:
-                resp = await session.fetch(url, timeout_ms=timeout * 1000)
-                if resp.status == 200:
+                # network_idle=False — Reddit/CF never fully idle (polls, pings)
+                # Use shorter timeout for CF sites (30s), longer for Reddit/SPA (45s)
+                fetch_timeout = 30000 if solve_cf else min(timeout * 1000, 45000)
+                resp = await session.fetch(
+                    url,
+                    network_idle=False,
+                    adaptive=True,
+                    timeout_ms=fetch_timeout,
+                )
+                if resp and resp.status < 400:
                     content = resp.body
+                    # Scrapling may return bytes or str
+                    if isinstance(content, str):
+                        content = content.encode("utf-8", errors="replace")
                     content_type = resp.headers.get("content-type", "text/html") if resp.headers else "text/html"
-                    return content, dict(resp.headers or {}), content_type
-                logger.debug("Scrapling returned status %d", resp.status)
+                    headers = dict(resp.headers or {})
+                    logger.debug("Scrapling fetch succeeded (status=%d)", resp.status)
+                    return content, headers, resp.status, "scrapling"
+                logger.debug("Scrapling returned status %d", resp.status if resp else -1)
             finally:
                 await session.close()
         except Exception as e:
             logger.debug("Scrapling failed: %s", e)
-    
-    # Tier 3: httpx (last resort)
+
+    # ── Tier 3: httpx (last resort, no stealth) ───────────────────────────
     try:
-        logger.debug("Fetching with httpx: %s", url)
-        async with httpx.AsyncClient(headers=headers, follow_redirects=True) as client:
+        logger.debug("Fetching with httpx (fallback): %s", url)
+        async with httpx.AsyncClient(follow_redirects=True) as client:
             resp = await client.get(url, timeout=timeout)
-            if resp.status_code == 200:
-                content_type = resp.headers.get("content-type", "text/html")
-                return resp.content, dict(resp.headers), content_type
-            logger.debug("httpx returned status %d", resp.status_code)
+            content_type = resp.headers.get("content-type", "text/html")
+            return resp.content, dict(resp.headers), resp.status_code, "httpx"
     except Exception as e:
         logger.debug("httpx failed: %s", e)
-    
+
     raise Exception(f"All local fetchers failed for {url}")
 
 
@@ -1336,10 +1440,12 @@ async def _fetch_and_process_locally(url: str, timeout: int = 60) -> Optional[Di
     is_reddit = "reddit.com" in url.lower()
 
     try:
-        content_bytes, headers, content_type = await _fetch_raw(url, timeout)
+        content_bytes, headers, status_code, fetcher = await _fetch_raw(url, timeout)
     except Exception as e:
         logger.debug("Local fetch failed for %s: %s", url, e)
         return None  # Signal to fall back to cloud API
+
+    content_type = headers.get("content-type", "text/html")
 
     # ── Reddit JSON API: parse structured post + comments ──────────────────
     if is_reddit:
