@@ -127,7 +127,7 @@ web:
 ### ✅ Ready for Testing
 Your comprehensive research use case should work:
 
-"Comprehensive research about pneumonia in ER , fetch as least 10 up-to-date, evidence-based and reliable sources or guidelines, make it into .md file in /workspace folder, write 2000 words first then edit for more contents."
+"Comprehensive research about pneumonia in ER , fetch at least 10 up-to-date, evidence-based and reliable sources or guidelines, make it into .md file in ~/workspace folder, write 2000 words first then edit for more contents."
 
 **Expected Output:**
 - ✅ ~7000 words
