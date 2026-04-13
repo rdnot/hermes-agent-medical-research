@@ -10384,10 +10384,6 @@ class AIAgent:
                         tool_summary = self._build_tools_summary(self._current_turn_tool_calls)
                         if tool_summary:
                             self._pending_tool_summary = tool_summary
-                    logger.info("DEBUG tool_summary: calls=%d, summary_len=%d, summary=%r",
-                                len(self._current_turn_tool_calls),
-                                len(self._pending_tool_summary),
-                                self._pending_tool_summary[:200])
 
                     final_msg = self._build_assistant_message(assistant_message, finish_reason)
 
@@ -10559,18 +10555,11 @@ class AIAgent:
             if msg.get("role") == "assistant" and msg.get("reasoning"):
                 last_reasoning = msg["reasoning"]
                 break
-        # ── Tool Summary (universal transparency) ────────────────────────
-        # Append tool usage summary to final_response so ALL consumers
-        # (CLI, Telegram, Discord, gateway, API) display it automatically.
-        _pending_summary = getattr(self, '_pending_tool_summary', '')
-        if _pending_summary and final_response:
-            final_response = final_response + "\n\n" + _pending_summary
-            self._pending_tool_summary = ""
 
         # Build result with interrupt info if applicable
         result = {
             "final_response": final_response,
-            "tool_summary": _pending_summary,  # Raw summary before appending, for consumers that need it separately
+            "tool_summary": getattr(self, '_pending_tool_summary', ''),  # CLI handles display separately
             "last_reasoning": last_reasoning,
             "messages": messages,
             "api_calls": api_call_count,
@@ -10858,9 +10847,7 @@ def main(
         print("\n🎯 FINAL RESPONSE:")
         print("-" * 30)
         print(result['final_response'])
-        pending = getattr(agent, "_pending_tool_summary", "")
-        if pending:
-            print(f"\n{pending}")
+        # Tool summary handled by cli.py separately via result['tool_summary']
     
     # Save sample trajectory to UUID-named file if requested
     if save_sample:
