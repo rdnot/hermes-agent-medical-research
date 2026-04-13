@@ -10480,6 +10480,13 @@ class AIAgent:
             if msg.get("role") == "assistant" and msg.get("reasoning"):
                 last_reasoning = msg["reasoning"]
                 break
+        # ── Tool Summary (universal transparency) ────────────────────────
+        # Append tool usage summary to final_response so ALL consumers
+        # (CLI, Telegram, Discord, gateway, API) display it automatically.
+        _pending_summary = getattr(self, '_pending_tool_summary', '')
+        if _pending_summary and final_response:
+            final_response = final_response + "\n\n" + _pending_summary
+            self._pending_tool_summary = ""
 
         # Build result with interrupt info if applicable
         result = {
