@@ -10309,6 +10309,10 @@ class AIAgent:
                         tool_summary = self._build_tools_summary(self._current_turn_tool_calls)
                         if tool_summary:
                             self._pending_tool_summary = tool_summary
+                    logger.info("DEBUG tool_summary: calls=%d, summary_len=%d, summary=%r",
+                                len(self._current_turn_tool_calls),
+                                len(self._pending_tool_summary),
+                                self._pending_tool_summary[:200])
 
                     final_msg = self._build_assistant_message(assistant_message, finish_reason)
 
@@ -10491,6 +10495,7 @@ class AIAgent:
         # Build result with interrupt info if applicable
         result = {
             "final_response": final_response,
+            "tool_summary": _pending_summary,  # Raw summary before appending, for consumers that need it separately
             "last_reasoning": last_reasoning,
             "messages": messages,
             "api_calls": api_call_count,

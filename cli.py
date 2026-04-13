@@ -7909,10 +7909,17 @@ class HermesCLI:
                     # Text was already printed sentence-by-sentence; just close the box
                     w = shutil.get_terminal_size().columns
                     _cprint(f"\n{_ACCENT}╰{'─' * (w - 2)}╯{_RST}")
+                    # Still print tool summary if present
+                    _tool_summary = (result.get('tool_summary') or '') if result else ''
+                    if _tool_summary:
+                        _cprint(_tool_summary)
                 elif already_streamed:
                     # Response was already streamed token-by-token with box framing;
                     # _flush_stream() already closed the box. Skip Rich Panel.
-                    pass
+                    # But still print any tool summary that was appended after streaming.
+                    _tool_summary = (result.get('tool_summary') or '') if result else ''
+                    if _tool_summary:
+                        _cprint(_tool_summary)
                 else:
                     _chat_console = ChatConsole()
                     _chat_console.print(Panel(
