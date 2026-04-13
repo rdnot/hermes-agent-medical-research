@@ -328,16 +328,19 @@ For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETI
 
 ## Context Compression (config.yaml only)
 
-Context compression is configured exclusively through the `compression` section in `config.yaml` — there are no environment variables for it.
+Context compression is configured exclusively through `config.yaml` — there are no environment variables for it. Threshold settings live in the `compression:` block, while the summarization model/provider lives under `auxiliary.compression:`.
 
 ```yaml
 compression:
   enabled: true
   threshold: 0.50
-  summary_model: ""                            # empty = use main configured model
-  summary_provider: auto
-  summary_base_url: null  # Custom OpenAI-compatible endpoint for summaries
+  target_ratio: 0.20         # fraction of threshold to preserve as recent tail
+  protect_last_n: 20         # minimum recent messages to keep uncompressed
 ```
+
+:::info Legacy migration
+Older configs with `compression.summary_model`, `compression.summary_provider`, and `compression.summary_base_url` are automatically migrated to `auxiliary.compression.*` on first load.
+:::
 
 ## Auxiliary Task Overrides
 
