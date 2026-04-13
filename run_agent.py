@@ -7632,6 +7632,7 @@ class AIAgent:
         # ── Tool Call Tracking (for summary display) ─────────────────────
         # Track all tool calls in this turn for transparency and audit trail.
         self._current_turn_tool_calls: List[Dict[str, Any]] = []
+        self._pending_tool_summary = ""
 
         # ── Force-Final Threshold (prevent infinite tool loops) ───────────
         # When iteration budget reaches this threshold with pending tool calls,
@@ -10087,11 +10088,12 @@ class AIAgent:
                     final_response = self._strip_think_blocks(final_response).strip()
 
                     # ── Tool Summary Display (transparency) ─────────────────
-                    # Show all tools used in this turn before the final answer.
+                    # Store for display AFTER final_response is printed.
+                    self._pending_tool_summary = ""
                     if self._current_turn_tool_calls:
                         tool_summary = self._build_tools_summary(self._current_turn_tool_calls)
                         if tool_summary:
-                            self._safe_print(f"\n{tool_summary}")
+                            self._pending_tool_summary = tool_summary
 
                     final_msg = self._build_assistant_message(assistant_message, finish_reason)
 
@@ -10568,6 +10570,9 @@ def main(
         print("\n🎯 FINAL RESPONSE:")
         print("-" * 30)
         print(result['final_response'])
+        pending = getattr(agent, "_pending_tool_summary", "")
+        if pending:
+            print(f"\n{pending}")
     
     # Save sample trajectory to UUID-named file if requested
     if save_sample:
