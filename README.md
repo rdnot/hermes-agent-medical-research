@@ -75,6 +75,8 @@ Features that don't fit Hermes architecture:
 - **Increased Context Allowance**: Increased `DEFAULT_RESULT_SIZE_CHARS` from `100,000` to `400,000` characters and DEFAULT_TURN_BUDGET_CHARS from `100,000` to `500,000` characters to handle massive text payloads from heavy medical research data.
 
 ## What You Can Do Now (setting up for medical research)
+- **Tell Hermes to** : pull this fork into local Hermes agent ( https://github.com/rdnot/hermes-agent-medical-research/ )
+
 - **Tell Hermes to** : set SOUL.md to
 ```
 I am Hermes agent, a helpful AI assistant for ER doctor.
