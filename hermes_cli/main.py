@@ -4124,6 +4124,8 @@ def _coalesce_session_name_args(argv: list) -> list:
         "status", "cron", "doctor", "config", "pairing", "skills", "tools",
         "mcp", "sessions", "insights", "version", "update", "uninstall",
         "profile", "dashboard",
+        "honcho", "claw", "plugins", "acp",
+        "webhook", "memory", "dump", "debug", "backup", "import", "completion", "logs",
     }
     _SESSION_FLAGS = {"-c", "--continue", "-r", "--resume"}
 
@@ -4419,17 +4421,20 @@ def cmd_dashboard(args):
         host=args.host,
         port=args.port,
         open_browser=not args.no_open,
+        allow_public=getattr(args, "insecure", False),
     )
 
 
-def cmd_completion(args):
+def cmd_completion(args, parser=None):
     """Print shell completion script."""
-    from hermes_cli.profiles import generate_bash_completion, generate_zsh_completion
+    from hermes_cli.completion import generate_bash, generate_zsh, generate_fish
     shell = getattr(args, "shell", "bash")
     if shell == "zsh":
-        print(generate_zsh_completion())
+        print(generate_zsh(parser))
+    elif shell == "fish":
+        print(generate_fish(parser))
     else:
-        print(generate_bash_completion())
+        print(generate_bash(parser))
 
 
 def cmd_logs(args):
@@ -5909,13 +5914,13 @@ Examples:
     # =========================================================================
     completion_parser = subparsers.add_parser(
         "completion",
-        help="Print shell completion script (bash or zsh)",
+        help="Print shell completion script (bash, zsh, or fish)",
     )
     completion_parser.add_argument(
-        "shell", nargs="?", default="bash", choices=["bash", "zsh"],
+        "shell", nargs="?", default="bash", choices=["bash", "zsh", "fish"],
         help="Shell type (default: bash)",
     )
-    completion_parser.set_defaults(func=cmd_completion)
+    completion_parser.set_defaults(func=lambda args: cmd_completion(args, parser))
 
     # =========================================================================
     # dashboard command
@@ -5928,6 +5933,10 @@ Examples:
     dashboard_parser.add_argument("--port", type=int, default=9119, help="Port (default 9119)")
     dashboard_parser.add_argument("--host", default="127.0.0.1", help="Host (default 127.0.0.1)")
     dashboard_parser.add_argument("--no-open", action="store_true", help="Don't open browser automatically")
+    dashboard_parser.add_argument(
+        "--insecure", action="store_true",
+        help="Allow binding to non-localhost (DANGEROUS: exposes API keys on the network)",
+    )
     dashboard_parser.set_defaults(func=cmd_dashboard)
 
     # =========================================================================
