@@ -82,6 +82,8 @@ Features that don't fit Hermes architecture:
 ## What You Can Do Now (setting up for medical research)
 - **Tell Hermes to** : pull this fork into local Hermes agent ( https://github.com/rdnot/hermes-agent-medical-research/ )
 
+- **Restart Hermes agent** : `/exit` then `hermes chat` (in CLI), `/restart` (in messaging app)
+
 - **Tell Hermes to** : set SOUL.md to
 ```
 I am Hermes agent, a helpful AI assistant for ER doctor.
@@ -121,15 +123,18 @@ Language: English
 * Always list relevant URL references at the end of response.
 ```
 - **Tell Hermes to** : set web.backend to tavily , and set the api key in env (or other web search services, or even tell Hermes to install and set up local searxng for free local websearch)
-- **Tell Hermes to** : set web.extract_backend to local (curl_cffi/scrapling + trafilatura)
+- **Tell Hermes to** : set web.extract_backend to local
 [or set in config yourself]
 ```
 web:
   backend: tavily
   extract_backend: local
 ```
-- **Tell Hermes to** : install required dependencies (curl_cffi, scrapling, trafilatura, PyMuPDF(optional))
-- **Tell Hermes to** : test web search service and local web extraction function
+- **Tell Hermes to** : install required dependencies (curl_cffi, scrapling, scrapling[fetchers], trafilatura, PyMuPDF(optional)) then install the browser dependencies with `scrapling install`)
+
+- **Restart Hermes agent** : `/exit` then `hermes chat` (in CLI), `/restart` (in messaging app)
+  
+- **Tell Hermes to** : do 1 web search then 1 local web extraction about pubmed pneumonia article then summarize
 
 ### ✅ Ready for Testing
 Your comprehensive research use case should work:
