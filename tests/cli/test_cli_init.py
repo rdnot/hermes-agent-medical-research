@@ -59,7 +59,7 @@ class TestMaxTurnsResolution:
     def test_default_max_turns_is_integer(self):
         cli = _make_cli()
         assert isinstance(cli.max_turns, int)
-        assert cli.max_turns == 90
+        assert cli.max_turns == 200
 
     def test_explicit_max_turns_honored(self):
         cli = _make_cli(max_turns=25)
@@ -68,7 +68,7 @@ class TestMaxTurnsResolution:
     def test_none_max_turns_gets_default(self):
         cli = _make_cli(max_turns=None)
         assert isinstance(cli.max_turns, int)
-        assert cli.max_turns == 90
+        assert cli.max_turns == 200
 
     def test_env_var_max_turns(self):
         """Env var is used when config file doesn't set max_turns."""
@@ -82,7 +82,7 @@ class TestMaxTurnsResolution:
     def test_max_turns_never_none_for_agent(self):
         """The value passed to AIAgent must never be None (causes TypeError in run_conversation)."""
         cli = _make_cli()
-        assert isinstance(cli.max_turns, int) and cli.max_turns == 90
+        assert isinstance(cli.max_turns, int) and cli.max_turns == 200
 
 
 class TestVerboseAndToolProgress:
