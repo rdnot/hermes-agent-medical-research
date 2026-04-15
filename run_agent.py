@@ -457,6 +457,15 @@ def _sanitize_messages_non_ascii(messages: list) -> bool:
                             if sanitized != fn_args:
                                 fn["arguments"] = sanitized
                                 found = True
+        # Sanitize any additional top-level string fields (e.g. reasoning_content)
+        for key, value in msg.items():
+            if key in {"content", "name", "tool_calls", "role"}:
+                continue
+            if isinstance(value, str):
+                sanitized = _strip_non_ascii(value)
+                if sanitized != value:
+                    msg[key] = sanitized
+                    found = True
     return found
 
 
@@ -705,12 +714,13 @@ class AIAgent:
         except Exception:
             pass
 
-        # GPT-5.x models require the Responses API path — they are rejected
-        # on /v1/chat/completions by both OpenAI and OpenRouter.  Also
-        # auto-upgrade for direct OpenAI URLs (api.openai.com) since all
-        # newer tool-calling models prefer Responses there.
-        # ACP runtimes are excluded: CopilotACPClient handles its own
-        # routing and does not implement the Responses API surface.
+        # GPT-5.x models usually require the Responses API path, but some
+        # providers have exceptions (for example Copilot's gpt-5-mini still
+        # uses chat completions). Also auto-upgrade for direct OpenAI URLs
+        # (api.openai.com) since all newer tool-calling models prefer
+        # Responses there. ACP runtimes are excluded: CopilotACPClient
+        # handles its own routing and does not implement the Responses API
+        # surface.
         if (
             self.api_mode == "chat_completions"
             and self.provider != "copilot-acp"
@@ -718,7 +728,10 @@ class AIAgent:
             and not str(self.base_url or "").lower().startswith("acp+tcp://")
             and (
                 self._is_direct_openai_url()
-                or self._model_requires_responses_api(self.model)
+                or self._provider_model_requires_responses_api(
+                    self.model,
+                    provider=self.provider,
+                )
             )
         ):
             self.api_mode = "codex_responses"
@@ -754,6 +767,7 @@ class AIAgent:
         self._interrupt_requested = False
         self._interrupt_message = None  # Optional message that triggered interrupt
         self._execution_thread_id: int | None = None  # Set at run_conversation() start
+        self._interrupt_thread_signal_pending = False
         self._client_lock = threading.RLock()
         
         # Subagent delegation state
@@ -1223,14 +1237,27 @@ class AIAgent:
                 logger.warning("Memory provider plugin init failed: %s", _mpe)
                 self._memory_manager = None
 
-        # Inject memory provider tool schemas into the tool surface
+        # Inject memory provider tool schemas into the tool surface.
+        # Skip tools whose names already exist (plugins may register the
+        # same tools via ctx.register_tool(), which lands in self.tools
+        # through get_tool_definitions()).  Duplicate function names cause
+        # 400 errors on providers that enforce unique names (e.g. Xiaomi
+        # MiMo via Nous Portal).
         if self._memory_manager and self.tools is not None:
+            _existing_tool_names = {
+                t.get("function", {}).get("name")
+                for t in self.tools
+                if isinstance(t, dict)
+            }
             for _schema in self._memory_manager.get_all_tool_schemas():
+                _tname = _schema.get("name", "")
+                if _tname and _tname in _existing_tool_names:
+                    continue  # already registered via plugin path
                 _wrapped = {"type": "function", "function": _schema}
                 self.tools.append(_wrapped)
-                _tname = _schema.get("name", "")
                 if _tname:
                     self.valid_tool_names.add(_tname)
+                    _existing_tool_names.add(_tname)
 
         # Skills config: nudge interval for skill creation reminders
         self._skill_nudge_interval = 10
@@ -1936,6 +1963,24 @@ class AIAgent:
         if "/" in m:
             m = m.rsplit("/", 1)[-1]
         return m.startswith("gpt-5")
+
+    @staticmethod
+    def _provider_model_requires_responses_api(
+        model: str,
+        *,
+        provider: Optional[str] = None,
+    ) -> bool:
+        """Return True when this provider/model pair should use Responses API."""
+        normalized_provider = (provider or "").strip().lower()
+        if normalized_provider == "copilot":
+            try:
+                from hermes_cli.models import _should_use_copilot_responses_api
+                return _should_use_copilot_responses_api(model)
+            except Exception:
+                # Fall back to the generic GPT-5 rule if Copilot-specific
+                # logic is unavailable for any reason.
+                pass
+        return AIAgent._model_requires_responses_api(model)
 
     def _max_tokens_param(self, value: int) -> dict:
         """Return the correct max tokens kwarg for the current provider.
@@ -2985,7 +3030,15 @@ class AIAgent:
         # Signal all tools to abort any in-flight operations immediately.
         # Scope the interrupt to this agent's execution thread so other
         # agents running in the same process (gateway) are not affected.
-        _set_interrupt(True, self._execution_thread_id)
+        if self._execution_thread_id is not None:
+            _set_interrupt(True, self._execution_thread_id)
+            self._interrupt_thread_signal_pending = False
+        else:
+            # The interrupt arrived before run_conversation() finished
+            # binding the agent to its execution thread. Defer the tool-level
+            # interrupt signal until startup completes instead of targeting
+            # the caller thread by mistake.
+            self._interrupt_thread_signal_pending = True
         # Propagate interrupt to any running child agents (subagent delegation)
         with self._active_children_lock:
             children_copy = list(self._active_children)
@@ -3001,7 +3054,9 @@ class AIAgent:
         """Clear any pending interrupt request and the per-thread tool interrupt signal."""
         self._interrupt_requested = False
         self._interrupt_message = None
-        _set_interrupt(False, self._execution_thread_id)
+        self._interrupt_thread_signal_pending = False
+        if self._execution_thread_id is not None:
+            _set_interrupt(False, self._execution_thread_id)
 
     def _touch_activity(self, desc: str) -> None:
         """Update the last-activity timestamp and description (thread-safe)."""
@@ -5558,8 +5613,26 @@ class AIAgent:
 
         t = threading.Thread(target=_call, daemon=True)
         t.start()
+        _last_heartbeat = time.time()
+        _HEARTBEAT_INTERVAL = 30.0  # seconds between gateway activity touches
         while t.is_alive():
             t.join(timeout=0.3)
+
+            # Periodic heartbeat: touch the agent's activity tracker so the
+            # gateway's inactivity monitor knows we're alive while waiting
+            # for stream chunks.  Without this, long thinking pauses (e.g.
+            # reasoning models) or slow prefill on local providers (Ollama)
+            # trigger false inactivity timeouts.  The _call thread touches
+            # activity on each chunk, but the gap between API call start
+            # and first chunk can exceed the gateway timeout — especially
+            # when the stale-stream timeout is disabled (local providers).
+            _hb_now = time.time()
+            if _hb_now - _last_heartbeat >= _HEARTBEAT_INTERVAL:
+                _last_heartbeat = _hb_now
+                _waiting_secs = int(_hb_now - last_chunk_time["t"])
+                self._touch_activity(
+                    f"waiting for stream response ({_waiting_secs}s, no chunks yet)"
+                )
 
             # Detect stale streams: connections kept alive by SSE pings
             # but delivering no real chunks.  Kill the client so the
@@ -5714,9 +5787,13 @@ class AIAgent:
                 fb_api_mode = "anthropic_messages"
             elif self._is_direct_openai_url(fb_base_url):
                 fb_api_mode = "codex_responses"
-            elif self._model_requires_responses_api(fb_model):
-                # GPT-5.x models need Responses API on every provider
-                # (OpenRouter, Copilot, direct OpenAI, etc.)
+            elif self._provider_model_requires_responses_api(
+                fb_model,
+                provider=fb_provider,
+            ):
+                # GPT-5.x models usually need Responses API, but keep
+                # provider-specific exceptions like Copilot gpt-5-mini on
+                # chat completions.
                 fb_api_mode = "codex_responses"
 
             old_model = self.model
@@ -7177,8 +7254,22 @@ class AIAgent:
         # Each slot holds (function_name, function_args, function_result, duration, error_flag)
         results = [None] * num_tools
 
+        # Touch activity before launching workers so the gateway knows
+        # we're executing tools (not stuck).
+        self._current_tool = tool_names_str
+        self._touch_activity(f"executing {num_tools} tools concurrently: {tool_names_str}")
+
         def _run_tool(index, tool_call, function_name, function_args):
             """Worker function executed in a thread."""
+            # Set the activity callback on THIS worker thread so
+            # _wait_for_process (terminal commands) can fire heartbeats.
+            # The callback is thread-local; the main thread's callback
+            # is invisible to worker threads.
+            try:
+                from tools.environments.base import set_activity_callback
+                set_activity_callback(self._touch_activity)
+            except Exception:
+                pass
             start = time.time()
             try:
                 result = self._invoke_tool(function_name, function_args, effective_task_id, tool_call.id)
@@ -7208,8 +7299,26 @@ class AIAgent:
                     f = executor.submit(_run_tool, i, tc, name, args)
                     futures.append(f)
 
-                # Wait for all to complete (exceptions are captured inside _run_tool)
-                concurrent.futures.wait(futures)
+                # Wait for all to complete with periodic heartbeats so the
+                # gateway's inactivity monitor doesn't kill us during long
+                # concurrent tool batches.
+                _conc_start = time.time()
+                while True:
+                    done, not_done = concurrent.futures.wait(
+                        futures, timeout=30.0,
+                    )
+                    if not not_done:
+                        break
+                    _conc_elapsed = int(time.time() - _conc_start)
+                    _still_running = [
+                        parsed_calls[futures.index(f)][1]
+                        for f in not_done
+                        if f in futures
+                    ]
+                    self._touch_activity(
+                        f"concurrent tools running ({_conc_elapsed}s, "
+                        f"{len(not_done)} remaining: {', '.join(_still_running[:3])})"
+                    )
         finally:
             if spinner:
                 # Build a summary message for the spinner stop
@@ -7441,6 +7550,16 @@ class AIAgent:
                     old_text=function_args.get("old_text"),
                     store=self._memory_store,
                 )
+                # Bridge: notify external memory provider of built-in memory writes
+                if self._memory_manager and function_args.get("action") in ("add", "replace"):
+                    try:
+                        self._memory_manager.on_memory_write(
+                            function_args.get("action", ""),
+                            target,
+                            function_args.get("content", ""),
+                        )
+                    except Exception:
+                        pass
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
@@ -7917,6 +8036,7 @@ class AIAgent:
         self._thinking_prefill_retries = 0
         self._post_tool_empty_retried = False
         self._last_content_with_tools = None
+        self._last_content_tools_all_housekeeping = False
         self._mute_post_response = False
         self._unicode_sanitization_passes = 0
 
@@ -8114,6 +8234,7 @@ class AIAgent:
                     self._empty_content_retries = 0
                     self._thinking_prefill_retries = 0
                     self._last_content_with_tools = None
+                    self._last_content_tools_all_housekeeping = False
                     self._mute_post_response = False
                     # Re-estimate after compression
                     _preflight_tokens = estimate_request_tokens_rough(
@@ -8173,11 +8294,19 @@ class AIAgent:
         
         # Record the execution thread so interrupt()/clear_interrupt() can
         # scope the tool-level interrupt signal to THIS agent's thread only.
-        # Must be set before clear_interrupt() which uses it.
+        # Must be set before any thread-scoped interrupt syncing.
         self._execution_thread_id = threading.current_thread().ident
 
-        # Clear any stale interrupt state at start
-        self.clear_interrupt()
+        # Always clear stale per-thread state from a previous turn. If an
+        # interrupt arrived before startup finished, preserve it and bind it
+        # to this execution thread now instead of dropping it on the floor.
+        _set_interrupt(False, self._execution_thread_id)
+        if self._interrupt_requested:
+            _set_interrupt(True, self._execution_thread_id)
+            self._interrupt_thread_signal_pending = False
+        else:
+            self._interrupt_message = None
+            self._interrupt_thread_signal_pending = False
 
         # External memory provider: prefetch once before the tool loop.
         # Reuse the cached result on every iteration to avoid re-calling
@@ -9059,7 +9188,19 @@ class AIAgent:
                             # ASCII codec: the system encoding can't handle
                             # non-ASCII characters at all. Sanitize all
                             # non-ASCII content from messages/tool schemas and retry.
+                            # Sanitize both the canonical `messages` list and
+                            # `api_messages` (the API-copy built before the retry
+                            # loop, which may contain extra fields like
+                            # reasoning_content that are not in `messages`).
                             _messages_sanitized = _sanitize_messages_non_ascii(messages)
+                            if isinstance(api_messages, list):
+                                _sanitize_messages_non_ascii(api_messages)
+                            # Also sanitize the last api_kwargs if already built,
+                            # so a leftover non-ASCII value in a transformed field
+                            # (e.g. extra_body, reasoning_content) doesn't survive
+                            # into the next attempt via _build_api_kwargs cache paths.
+                            if isinstance(api_kwargs, dict):
+                                _sanitize_structure_non_ascii(api_kwargs)
                             _prefill_sanitized = False
                             if isinstance(getattr(self, "prefill_messages", None), list):
                                 _prefill_sanitized = _sanitize_messages_non_ascii(self.prefill_messages)
@@ -9117,22 +9258,34 @@ class AIAgent:
                                         force=True,
                                     )
 
-                            if (
+                            # Always retry on ASCII codec detection —
+                            # _force_ascii_payload guarantees the full
+                            # api_kwargs payload is sanitized on the
+                            # next iteration (line ~8475).  Even when
+                            # per-component checks above find nothing
+                            # (e.g. non-ASCII only in api_messages'
+                            # reasoning_content), the flag catches it.
+                            # Bounded by _unicode_sanitization_passes < 2.
+                            self._unicode_sanitization_passes += 1
+                            _any_sanitized = (
                                 _messages_sanitized
                                 or _prefill_sanitized
                                 or _tools_sanitized
                                 or _system_sanitized
                                 or _headers_sanitized
                                 or _credential_sanitized
-                            ):
-                                self._unicode_sanitization_passes += 1
+                            )
+                            if _any_sanitized:
                                 self._vprint(
                                     f"{self.log_prefix}⚠️  System encoding is ASCII — stripped non-ASCII characters from request payload. Retrying...",
                                     force=True,
                                 )
-                                continue
-                        # Nothing to sanitize in any payload component.
-                        # Fall through to normal error path.
+                            else:
+                                self._vprint(
+                                    f"{self.log_prefix}⚠️  System encoding is ASCII — enabling full-payload sanitization for retry...",
+                                    force=True,
+                                )
+                            continue
 
                     status_code = getattr(api_error, "status_code", None)
                     error_context = self._extract_api_error_context(api_error)
@@ -10204,6 +10357,7 @@ class AIAgent:
                             tc.function.name in _HOUSEKEEPING_TOOLS
                             for tc in assistant_message.tool_calls
                         )
+                        self._last_content_tools_all_housekeeping = _all_housekeeping
                         if _all_housekeeping and self._has_stream_consumers():
                             self._mute_post_response = True
                         elif self.quiet_mode:
@@ -10386,15 +10540,22 @@ class AIAgent:
                             break
 
                         # If the previous turn already delivered real content alongside
-                        # tool calls (e.g. "You're welcome!" + memory save), the model
-                        # has nothing more to say. Use the earlier content immediately
-                        # instead of wasting API calls on retries that won't help.
+                        # HOUSEKEEPING tool calls (e.g. "You're welcome!" + memory save),
+                        # the model has nothing more to say. Use the earlier content
+                        # immediately instead of wasting API calls on retries.
+                        # NOTE: Only use this shortcut when ALL tools in that turn were
+                        # housekeeping (memory, todo, etc.).  When substantive tools
+                        # were called (terminal, search_files, etc.), the content was
+                        # likely mid-task narration ("I'll scan the directory...") and
+                        # the empty follow-up means the model choked — let the
+                        # post-tool nudge below handle that instead of exiting early.
                         fallback = getattr(self, '_last_content_with_tools', None)
-                        if fallback:
+                        if fallback and getattr(self, '_last_content_tools_all_housekeeping', False):
                             _turn_exit_reason = "fallback_prior_turn_content"
                             logger.info("Empty follow-up after tool calls — using prior turn content as final response")
                             self._emit_status("↻ Empty response after tool calls — using earlier content as final answer")
                             self._last_content_with_tools = None
+                            self._last_content_tools_all_housekeeping = False
                             self._empty_content_retries = 0
                             # Do NOT modify the assistant message content — the
                             # old code injected "Calling the X tools..." which
@@ -10405,13 +10566,18 @@ class AIAgent:
                             break
 
                         # ── Post-tool-call empty response nudge ───────────
-                        # The model returned empty after executing tool calls
-                        # but there's no prior-turn content to fall back on.
+                        # The model returned empty after executing tool calls.
+                        # This covers two cases:
+                        #  (a) No prior-turn content at all — model went silent
+                        #  (b) Prior turn had content + SUBSTANTIVE tools (the
+                        #      fallback above was skipped because the content
+                        #      was mid-task narration, not a final answer)
                         # Instead of giving up, nudge the model to continue by
                         # appending a user-level hint.  This is the #9400 case:
-                        # weaker models (GLM-5, etc.) sometimes return empty
-                        # after tool results instead of continuing to the next
-                        # step.  One retry with a nudge usually fixes it.
+                        # weaker models (mimo-v2-pro, GLM-5, etc.) sometimes
+                        # return empty after tool results instead of continuing
+                        # to the next step.  One retry with a nudge usually
+                        # fixes it.
                         _prior_was_tool = any(
                             m.get("role") == "tool"
                             for m in messages[-5:]  # check recent messages
@@ -10421,6 +10587,10 @@ class AIAgent:
                             and not getattr(self, "_post_tool_empty_retried", False)
                         ):
                             self._post_tool_empty_retried = True
+                            # Clear stale narration so it doesn't resurface
+                            # on a later empty response after the nudge.
+                            self._last_content_with_tools = None
+                            self._last_content_tools_all_housekeeping = False
                             logger.info(
                                 "Empty response after tool calls — nudging model "
                                 "to continue processing"
