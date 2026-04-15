@@ -1,6 +1,6 @@
 # Nanobot Medical Research Fork → Hermes-Agent Medical Research Fork Port Status
 
-**Date:** 2026-04-12 00:48 UTC+07:00
+**Date:** 2026-04-15 21:45 UTC+07:00
 
 ## Detailed Comparison Table
 
@@ -76,6 +76,8 @@ Features that don't fit Hermes architecture:
 
 ### CLI Display (`cli.py`)
 - **Tool Summary in Streaming Mode**: Fixed tool summary to display after final answer in CLI streaming mode. Summary stored in `result['tool_summary']` and printed explicitly after stream closes. Gateway channels unaffected.
+
+- **CLI/Gateway Default Alignment**: Updated CLI (`hermes_cli/config.py`) and Gateway (`gateway/run.py`) defaults from 90 to 200 iterations, aligning with `run_agent.py` default. All platforms now default to 200 iterations. Users can still override via `config.yaml` agent.max_turns.
 
 ## What You Can Do Now (setting up for medical research)
 - **Tell Hermes to** : pull this fork into local Hermes agent ( https://github.com/rdnot/hermes-agent-medical-research/ )
