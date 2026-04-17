@@ -1143,7 +1143,7 @@ def select_provider_and_model(args=None):
         _model_flow_kimi(config, current_model)
     elif selected_provider == "bedrock":
         _model_flow_bedrock(config, current_model)
-    elif selected_provider in ("gemini", "deepseek", "xai", "zai", "kimi-coding-cn", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface", "xiaomi", "arcee", "ollama-cloud"):
+    elif selected_provider in ("gemini", "deepseek", "xai", "zai", "kimi-coding-cn", "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go", "ai-gateway", "alibaba", "huggingface", "xiaomi", "arcee", "nvidia", "ollama-cloud"):
         _model_flow_api_key_provider(config, selected_provider, current_model)
 
     # ── Post-switch cleanup: clear stale OPENAI_BASE_URL ──────────────
@@ -2472,10 +2472,10 @@ def _model_flow_kimi(config, current_model=""):
 
     # Step 3: Model selection — show appropriate models for the endpoint
     if is_coding_plan:
-        # Coding Plan models (kimi-for-coding first)
+        # Coding Plan models (kimi-k2.5 first)
         model_list = [
-            "kimi-for-coding",
             "kimi-k2.5",
+            "kimi-for-coding",
             "kimi-k2-thinking",
             "kimi-k2-thinking-turbo",
         ]
@@ -4954,7 +4954,7 @@ For more help on a command:
     )
     chat_parser.add_argument(
         "--provider",
-        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "gemini", "xai", "ollama-cloud", "huggingface", "zai", "kimi-coding", "kimi-coding-cn", "minimax", "minimax-cn", "kilocode", "xiaomi", "arcee"],
+        choices=["auto", "openrouter", "nous", "openai-codex", "copilot-acp", "copilot", "anthropic", "gemini", "xai", "ollama-cloud", "huggingface", "zai", "kimi-coding", "kimi-coding-cn", "minimax", "minimax-cn", "kilocode", "xiaomi", "arcee", "nvidia"],
         default=None,
         help="Inference provider (default: auto)"
     )

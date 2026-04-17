@@ -38,6 +38,7 @@ _PROVIDER_PREFIXES: frozenset[str] = frozenset({
     "mimo", "xiaomi-mimo",
     "arcee-ai", "arceeai",
     "xai", "x-ai", "x.ai", "grok",
+    "nvidia", "nim", "nvidia-nim", "nemotron",
     "qwen-portal",
 })
 
@@ -158,6 +159,8 @@ DEFAULT_CONTEXT_LENGTHS = {
     "grok": 131072,             # catch-all (grok-beta, unknown grok-*)
     # Kimi
     "kimi": 262144,
+    # Nemotron — NVIDIA's open-weights series (128K context across all sizes)
+    "nemotron": 131072,
     # Arcee
     "trinity": 262144,
     # OpenRouter
@@ -240,6 +243,7 @@ _URL_TO_PROVIDER: Dict[str, str] = {
     "api.fireworks.ai": "fireworks",
     "opencode.ai": "opencode-go",
     "api.x.ai": "xai",
+    "integrate.api.nvidia.com": "nvidia",
     "api.xiaomimimo.com": "xiaomi",
     "xiaomimimo.com": "xiaomi",
     "ollama.com": "ollama-cloud",
