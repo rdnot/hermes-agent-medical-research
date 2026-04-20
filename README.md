@@ -28,7 +28,6 @@
 | **_CHAT_RETRY_DELAYS (5 attempts)** | ✅ (1,2,4,8,16) | ❌ Not Ported | **P1** |
 | **Write/Edit char limits** | ✅ Dynamic by max_tokens | ❌ Not Ported | P2 |
 | **web_fetch limit (500K)** | ✅ | ⚠️ 400K (close) | ACCEPT |
-| **Example system prompt** | ✅ medical-research | ❌ Not Ported | **P1** |
 
 ---
 
@@ -49,7 +48,6 @@ High-value config updates:
 2. **_CHAT_RETRY_DELAYS** — (1,2,4) → (1,2,4,8,16)
 3. **context_window_tokens** — Set to 200,000
 4. **ReadFileTool limits** — Add 768K char, 8K line limits  >>  can be set in config.yaml : file_read_max_chars
-5. **Copy example system prompt** — For testing
 
 ### **P2 — Optional** 💡
 Nice-to-have features:
