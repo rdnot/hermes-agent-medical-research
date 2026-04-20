@@ -386,7 +386,12 @@ export function useMainApp(gw: GatewayClient) {
   // and error paths never emit message.complete, so anything enqueued while
   // `!sleep` / a failed turn was running would stay stuck forever.
   useEffect(() => {
-    if (!ui.sid || ui.busy || composerRefs.queueEditRef.current !== null) {
+    if (
+      !ui.sid ||
+      ui.busy ||
+      composerRefs.queueEditRef.current !== null ||
+      composerRefs.queueRef.current.length === 0
+    ) {
       return
     }
 
@@ -448,6 +453,7 @@ export function useMainApp(gw: GatewayClient) {
     const handler = (ev: GatewayEvent) => onEventRef.current(ev)
 
     const exitHandler = () => {
+      turnController.reset()
       patchUiState({ busy: false, sid: null, status: 'gateway exited' })
       turnController.pushActivity('gateway exited · /logs to inspect', 'error')
       sys('error: gateway exited')
