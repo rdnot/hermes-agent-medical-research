@@ -738,12 +738,14 @@ class ShellFileOperations(FileOperations):
             content, old_string, new_string, replace_all
         )
         
-        if error:
-            return PatchResult(error=error)
-        
-        if match_count == 0:
-            return PatchResult(error=f"Could not find match for old_string in {path}")
-        
+        if error or match_count == 0:
+            err_msg = error or f"Could not find match for old_string in {path}"
+            try:
+                from tools.fuzzy_match import format_no_match_hint
+                err_msg += format_no_match_hint(err_msg, match_count, old_string, content)
+            except Exception:
+                pass
+            return PatchResult(error=err_msg)
         # Write back
         write_result = self.write_file(path, new_content)
         if write_result.error:
