@@ -152,7 +152,6 @@ _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
 _PROVIDER_VISION_MODELS: Dict[str, str] = {
     "xiaomi": "mimo-v2-omni",
     "zai": "glm-5v-turbo",
-    "nous": "xiaomi/mimo-v2-omni",
 }
 
 # OpenRouter app attribution headers
@@ -934,23 +933,16 @@ def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
         model = _NOUS_MODEL
     # Free-tier users can't use paid auxiliary models — use the free
     # models instead: mimo-v2-omni for vision, mimo-v2-pro for text tasks.
-    # For vision tasks, always use mimo-v2-omni regardless of tier —
-    # Nous inference API does not support image inputs for gemini models.
+    # Paid accounts keep their tier-appropriate models: gemini-3-flash-preview
+    # for both text and vision tasks.
     try:
         from hermes_cli.models import check_nous_free_tier
         if check_nous_free_tier():
             model = _NOUS_FREE_TIER_VISION_MODEL if vision else _NOUS_FREE_TIER_AUX_MODEL
             logger.debug("Free-tier Nous account — using %s for auxiliary/%s",
                          model, "vision" if vision else "text")
-        elif vision:
-            model = _NOUS_FREE_TIER_VISION_MODEL
-            logger.debug("Nous vision task — using %s (gemini models lack "
-                         "image support on Nous inference API)", model)
     except Exception:
-        if vision:
-            model = _NOUS_FREE_TIER_VISION_MODEL
-    if vision:
-        logger.debug("Nous vision: final model = %s", model)
+        pass
     if runtime is not None:
         api_key, base_url = runtime
     else:
@@ -2021,24 +2013,35 @@ def resolve_vision_provider_client(
         #      _PROVIDER_VISION_MODELS provides per-provider vision model
         #      overrides when the provider has a dedicated multimodal model
         #      that differs from the chat model (e.g. xiaomi → mimo-v2-omni,
-        #      zai → glm-5v-turbo).
+        #      zai → glm-5v-turbo). Nous is the exception: it has a dedicated
+        #      strict vision backend with tier-aware defaults, so it must not
+        #      fall through to the user's text chat model here.
         #   2. OpenRouter  (vision-capable aggregator fallback)
         #   3. Nous Portal (vision-capable aggregator fallback)
         #   4. Stop
         main_provider = _read_main_provider()
         main_model = _read_main_model()
         if main_provider and main_provider not in ("auto", ""):
-            vision_model = _PROVIDER_VISION_MODELS.get(main_provider, main_model)
-            rpc_client, rpc_model = resolve_provider_client(
-                main_provider, vision_model,
-                api_mode=resolved_api_mode)
-            if rpc_client is not None:
-                logger.info(
-                    "Vision auto-detect: using main provider %s (%s)",
-                    main_provider, rpc_model or vision_model,
-                )
-                return _finalize(
-                    main_provider, rpc_client, rpc_model or vision_model)
+            if main_provider == "nous":
+                sync_client, default_model = _resolve_strict_vision_backend(main_provider)
+                if sync_client is not None:
+                    logger.info(
+                        "Vision auto-detect: using main provider %s (%s)",
+                        main_provider, default_model or resolved_model or main_model,
+                    )
+                    return _finalize(main_provider, sync_client, default_model)
+            else:
+                vision_model = _PROVIDER_VISION_MODELS.get(main_provider, main_model)
+                rpc_client, rpc_model = resolve_provider_client(
+                    main_provider, vision_model,
+                    api_mode=resolved_api_mode)
+                if rpc_client is not None:
+                    logger.info(
+                        "Vision auto-detect: using main provider %s (%s)",
+                        main_provider, rpc_model or vision_model,
+                    )
+                    return _finalize(
+                        main_provider, rpc_client, rpc_model or vision_model)
 
         # Fall back through aggregators (uses their dedicated vision model,
         # not the user's main model) when main provider has no client.
