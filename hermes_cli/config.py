@@ -613,6 +613,10 @@ DEFAULT_CONFIG = {
     },
     
     # Text-to-speech configuration
+    # Each provider supports an optional `max_text_length:` override for the
+    # per-request input-character cap. Omit it to use the provider's documented
+    # limit (OpenAI 4096, xAI 15000, MiniMax 10000, ElevenLabs 5k-40k model-aware,
+    # Gemini 5000, Edge 5000, Mistral 4000, NeuTTS/KittenTTS 2000).
     "tts": {
         "provider": "edge",  # "edge" (free) | "elevenlabs" (premium) | "openai" | "xai" | "minimax" | "mistral" | "neutts" (local)
         "edge": {
@@ -1043,6 +1047,22 @@ OPTIONAL_ENV_VARS = {
         "prompt": "Kimi (China) API key",
         "url": "https://platform.moonshot.cn/",
         "password": True,
+        "category": "provider",
+        "advanced": True,
+    },
+    "STEPFUN_API_KEY": {
+        "description": "StepFun Step Plan API key",
+        "prompt": "StepFun Step Plan API key",
+        "url": "https://platform.stepfun.com/",
+        "password": True,
+        "category": "provider",
+        "advanced": True,
+    },
+    "STEPFUN_BASE_URL": {
+        "description": "StepFun Step Plan base URL override",
+        "prompt": "StepFun Step Plan base URL (leave empty for default)",
+        "url": None,
+        "password": False,
         "category": "provider",
         "advanced": True,
     },

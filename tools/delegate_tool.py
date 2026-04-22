@@ -23,10 +23,11 @@ logger = logging.getLogger(__name__)
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from typing import Any, Dict, List, Optional
 
 from toolsets import TOOLSETS
+from tools import file_state
 from utils import base_url_hostname
 
 
@@ -111,6 +112,31 @@ def _get_max_concurrent_children() -> int:
     return _DEFAULT_MAX_CONCURRENT_CHILDREN
 
 
+def _get_child_timeout() -> float:
+    """Read delegation.child_timeout_seconds from config.
+
+    Returns the number of seconds a single child agent is allowed to run
+    before being considered stuck.  Default: 300 s (5 minutes).
+    """
+    cfg = _load_config()
+    val = cfg.get("child_timeout_seconds")
+    if val is not None:
+        try:
+            return max(30.0, float(val))
+        except (TypeError, ValueError):
+            logger.warning(
+                "delegation.child_timeout_seconds=%r is not a valid number; "
+                "using default %d", val, DEFAULT_CHILD_TIMEOUT,
+            )
+    env_val = os.getenv("DELEGATION_CHILD_TIMEOUT_SECONDS")
+    if env_val:
+        try:
+            return max(30.0, float(env_val))
+        except (TypeError, ValueError):
+            pass
+    return float(DEFAULT_CHILD_TIMEOUT)
+
+
 def _get_max_spawn_depth() -> int:
     """Read delegation.max_spawn_depth from config, clamped to [1, 3].
 
@@ -164,7 +190,9 @@ def _get_orchestrator_enabled() -> bool:
 
 
 DEFAULT_MAX_ITERATIONS = 50
+DEFAULT_CHILD_TIMEOUT = 300  # seconds before a child agent is considered stuck
 _HEARTBEAT_INTERVAL = 30  # seconds between parent activity heartbeats during delegation
+_HEARTBEAT_STALE_CYCLES = 5  # mark child stale after this many heartbeats with no iteration progress
 DEFAULT_TOOLSETS = ["terminal", "file", "web"]
 
 
@@ -688,6 +716,8 @@ def _run_single_child(
     # Without this, the parent's _last_activity_ts freezes when delegate_task
     # starts and the gateway eventually kills the agent for "no activity".
     _heartbeat_stop = threading.Event()
+    _last_seen_iter = [0]  # mutable container for heartbeat stale detection
+    _stale_count = [0]
 
     def _heartbeat_loop():
         while not _heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
@@ -703,6 +733,25 @@ def _run_single_child(
                 child_tool = child_summary.get("current_tool")
                 child_iter = child_summary.get("api_call_count", 0)
                 child_max = child_summary.get("max_iterations", 0)
+
+                # Stale detection: if iteration count hasn't advanced,
+                # increment stale counter.  After N cycles with no
+                # progress, stop masking the hang so the gateway
+                # inactivity timeout can fire as a last resort.
+                if child_iter <= _last_seen_iter[0]:
+                    _stale_count[0] += 1
+                else:
+                    _last_seen_iter[0] = child_iter
+                    _stale_count[0] = 0
+
+                if _stale_count[0] >= _HEARTBEAT_STALE_CYCLES:
+                    logger.warning(
+                        "Subagent %d appears stale (no iteration progress "
+                        "for %d heartbeat cycles) — stopping heartbeat",
+                        task_index, _stale_count[0],
+                    )
+                    break  # stop touching parent, let gateway timeout fire
+
                 if child_tool:
                     desc = (f"delegate_task: subagent running {child_tool} "
                             f"(iteration {child_iter}/{child_max})")
@@ -728,7 +777,78 @@ def _run_single_child(
             except Exception as e:
                 logger.debug("Progress callback start failed: %s", e)
 
-        result = child.run_conversation(user_message=goal)
+        # File-state coordination: generate a stable child task_id so the
+        # file_state registry can attribute writes back to this subagent,
+        # and snapshot the parent's read set at launch time.  After the
+        # child returns we compare to detect "sibling modified files the
+        # parent previously read" and surface it as a reminder on the
+        # returned summary.
+        import uuid as _uuid
+        child_task_id = f"subagent-{task_index}-{_uuid.uuid4().hex[:8]}"
+        parent_task_id = getattr(parent_agent, "_current_task_id", None)
+        wall_start = time.time()
+        parent_reads_snapshot = (
+            list(file_state.known_reads(parent_task_id))
+            if parent_task_id else []
+        )
+
+        # Run child with a hard timeout to prevent indefinite blocking
+        # when the child's API call or tool-level HTTP request hangs.
+        child_timeout = _get_child_timeout()
+        _timeout_executor = ThreadPoolExecutor(max_workers=1)
+        _child_future = _timeout_executor.submit(
+            child.run_conversation, user_message=goal, task_id=child_task_id,
+        )
+        try:
+            result = _child_future.result(timeout=child_timeout)
+        except Exception as _timeout_exc:
+            # Signal the child to stop so its thread can exit cleanly.
+            try:
+                if hasattr(child, 'interrupt'):
+                    child.interrupt()
+                elif hasattr(child, '_interrupt_requested'):
+                    child._interrupt_requested = True
+            except Exception:
+                pass
+
+            is_timeout = isinstance(_timeout_exc, (FuturesTimeoutError, TimeoutError))
+            duration = round(time.monotonic() - child_start, 2)
+            logger.warning(
+                "Subagent %d %s after %.1fs",
+                task_index,
+                "timed out" if is_timeout else f"raised {type(_timeout_exc).__name__}",
+                duration,
+            )
+
+            if child_progress_cb:
+                try:
+                    child_progress_cb(
+                        "subagent.complete",
+                        preview=f"Timed out after {duration}s" if is_timeout else str(_timeout_exc),
+                        status="timeout" if is_timeout else "error",
+                        duration_seconds=duration,
+                        summary="",
+                    )
+                except Exception:
+                    pass
+
+            return {
+                "task_index": task_index,
+                "status": "timeout" if is_timeout else "error",
+                "summary": None,
+                "error": (
+                    f"Subagent timed out after {child_timeout}s with no response. "
+                    "The child may be stuck on a slow API call or unresponsive network request."
+                ) if is_timeout else str(_timeout_exc),
+                "exit_reason": "timeout" if is_timeout else "error",
+                "api_calls": 0,
+                "duration_seconds": duration,
+                "_child_role": getattr(child, "_delegate_role", None),
+            }
+        finally:
+            # Shut down executor without waiting — if the child thread
+            # is stuck on blocking I/O, wait=True would hang forever.
+            _timeout_executor.shutdown(wait=False)
 
         # Flush any remaining batched progress to gateway
         if child_progress_cb and hasattr(child_progress_cb, '_flush'):
@@ -825,6 +945,36 @@ def _run_single_child(
         }
         if status == "failed":
             entry["error"] = result.get("error", "Subagent did not produce a response.")
+
+        # Cross-agent file-state reminder.  If this subagent wrote any
+        # files the parent had already read, surface it so the parent
+        # knows to re-read before editing — the scenario that motivated
+        # the registry.  We check writes by ANY non-parent task_id (not
+        # just this child's), which also covers transitive writes from
+        # nested orchestrator→worker chains.
+        try:
+            if parent_task_id and parent_reads_snapshot:
+                sibling_writes = file_state.writes_since(
+                    parent_task_id, wall_start, parent_reads_snapshot
+                )
+                if sibling_writes:
+                    mod_paths = sorted(
+                        {p for paths in sibling_writes.values() for p in paths}
+                    )
+                    if mod_paths:
+                        reminder = (
+                            "\n\n[NOTE: subagent modified files the parent "
+                            "previously read — re-read before editing: "
+                            + ", ".join(mod_paths[:8])
+                            + (f" (+{len(mod_paths) - 8} more)" if len(mod_paths) > 8 else "")
+                            + "]"
+                        )
+                        if entry.get("summary"):
+                            entry["summary"] = entry["summary"] + reminder
+                        else:
+                            entry["stale_paths"] = mod_paths
+        except Exception:
+            logger.debug("file_state sibling-write check failed", exc_info=True)
 
         if child_progress_cb:
             try:
@@ -1275,6 +1425,9 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
             api_mode = "codex_responses"
         elif base_url_hostname(configured_base_url) == "api.anthropic.com":
             provider = "anthropic"
+            api_mode = "anthropic_messages"
+        elif "api.kimi.com/coding" in base_lower:
+            provider = "custom"
             api_mode = "anthropic_messages"
 
         return {
