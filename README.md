@@ -21,12 +21,12 @@
 | **max_tool_result_chars (400K)** | ✅ | ✅ Ported | **P0** |
 | **SearXNG Override** | ✅ Hardcoded URL | ❌ Not Ported | SKIP |
 | **WhatsApp Channel** | ✅ Enhanced markdown | ❌ Not Ported | SKIP |
-| **Commands (/s, /c, /rerun)** | ✅ 3 new commands | ❌ Not Ported | OPTIONAL |
-| **ExecTool timeout (90s)** | ✅ | ❌ Not Ported | **P1** |
-| **context_window_tokens (200K)** | ✅ | ❌ Not Ported | **P1** |
-| **ReadFileTool limits** | ✅ 768K chars, 8K lines | ❌ can be set in config | **P1** |
-| **_CHAT_RETRY_DELAYS (5 attempts)** | ✅ (1,2,4,8,16) | ❌ Not Ported | **P1** |
-| **Write/Edit char limits** | ✅ Dynamic by max_tokens | ❌ Not Ported | P2 |
+| **Commands (/s, /c, /rerun)** | ✅ 3 new commands | ❌ Not Ported | SKIP |
+| **ExecTool timeout (90s)** | ✅ | ❌ can be set in config | SKIP |
+| **context_window_tokens (200K)** | ✅ | ❌ can be set in config | SKIP |
+| **ReadFileTool limits** | ✅ 768K chars, 8K lines | ❌ can be set in config | SKIP |
+| **_CHAT_RETRY_DELAYS (5 attempts)** | ✅ (1,2,4,8,16) | ❌ Not Ported | SKIP |
+| **Write/Edit char limits** | ✅ Dynamic by max_tokens | ❌ Not Ported | SKIP |
 | **web_fetch limit (500K)** | ✅ | ⚠️ 400K (close) | ACCEPT |
 
 ---
@@ -42,23 +42,17 @@ All critical features for comprehensive research are complete:
 - 200 max iterations
 - 400K tool result size
 
-### **P1 — Should Port** ⚠️
-High-value config updates:
-1. **ExecTool timeout** — 60s → 90s
-2. **_CHAT_RETRY_DELAYS** — (1,2,4) → (1,2,4,8,16)
-3. **context_window_tokens** — Set to 200,000
-4. **ReadFileTool limits** — Add 768K char, 8K line limits  >>  can be set in config.yaml : file_read_max_chars
-
-### **P2 — Optional** 💡
-Nice-to-have features:
-1. **Write/Edit char limits** — Dynamic by max_tokens
-2. **web_fetch limit** — 400K → 500K (minor)
-
-### **SKIP — Not Worth Porting** ❌
+### **SKIP** ❌
 Features that don't fit Hermes architecture:
-1. **SearXNG override** — Hermes uses paid search APIs
-2. **WhatsApp channel** — No channel abstraction in Hermes
-3. **Custom commands (/s, /c, /rerun)** — CLI differences
+1. **SearXNG override** — Hermes uses paid search APIs (but no native Brave via API , SearXNG via URL) 
+2. **WhatsApp channel** — Hermes handles WhatsApp markdown rendering natively
+3. **Custom commands (/s, /c, /rerun)** — Hermes CLI has prefix matching for slash commands.
+4. **ExecTool timeout** — 60s → 90s  >>  can be set in config.yaml : code_execution.timeout (Default is 300), terminal.timeout (Default is 180)
+5. **_CHAT_RETRY_DELAYS** — (1,2,4) → (1,2,4,8,16) >> Hermes does 3 retries with roughly 5s → 10s → 20s delays (plus jitter)
+6. **context_window_tokens** — Set to 200,000  >>  can be set in config.yaml : model.context_length
+7. **ReadFileTool limits** — Add 768K char, 8K line limits  >>  can be set in config.yaml : file_read_max_chars
+8. **Write/Edit char limits** — Dynamic by max_tokens
+9. **web_fetch limit** — 400K → 500K (minor)
 
 ---
 
