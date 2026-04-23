@@ -108,6 +108,11 @@ def _strip_reasoning_tags(text: str) -> str:
     ``<thought>`` (Gemma 4).  Must stay in sync with
     ``run_agent.py::_strip_think_blocks`` and the stream consumer's
     ``_OPEN_THINK_TAGS`` / ``_CLOSE_THINK_TAGS`` tuples.
+
+    Also strips tool-call XML blocks some open models leak into visible
+    content (``<tool_call>``, ``<function_calls>``, Gemma-style
+    ``<function name="…">…</function>``). Ported from
+    openclaw/openclaw#67318.
     """
     cleaned = text
     for tag in _REASONING_TAGS:
@@ -132,6 +137,31 @@ def _strip_reasoning_tags(text: str) -> str:
             cleaned,
             flags=re.IGNORECASE,
         )
+    # Tool-call XML blocks (openclaw/openclaw#67318).
+    for tc_tag in ("tool_call", "tool_calls", "tool_result",
+                   "function_call", "function_calls"):
+        cleaned = re.sub(
+            rf"<{tc_tag}\b[^>]*>.*?</{tc_tag}>\s*",
+            "",
+            cleaned,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+    # <function name="..."> — boundary + attribute gated to avoid prose FPs.
+    cleaned = re.sub(
+        r'(?:(?<=^)|(?<=[\n\r.!?:]))[ \t]*'
+        r'<function\b[^>]*\bname\s*=[^>]*>'
+        r'(?:(?:(?!</function>).)*)</function>\s*',
+        '',
+        cleaned,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    # Stray tool-call close tags.
+    cleaned = re.sub(
+        r'</(?:tool_call|tool_calls|tool_result|function_call|function_calls|function)>\s*',
+        '',
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     return cleaned.strip()
 
 
@@ -912,6 +942,32 @@ def _cleanup_worktree(info: Dict[str, str] = None) -> None:
 
     _active_worktree = None
     print(f"\033[32m✓ Worktree cleaned up: {wt_path}\033[0m")
+
+
+def _run_state_db_auto_maintenance(session_db) -> None:
+    """Call ``SessionDB.maybe_auto_prune_and_vacuum`` using current config.
+
+    Reads the ``sessions:`` section from config.yaml via
+    :func:`hermes_cli.config.load_config` (the authoritative loader that
+    deep-merges DEFAULT_CONFIG, so unmigrated configs still get default
+    values). Honours ``auto_prune`` / ``retention_days`` /
+    ``vacuum_after_prune`` / ``min_interval_hours``, and delegates to the
+    DB. Never raises — maintenance must never block interactive startup.
+    """
+    if session_db is None:
+        return
+    try:
+        from hermes_cli.config import load_config as _load_full_config
+        cfg = (_load_full_config().get("sessions") or {})
+        if not cfg.get("auto_prune", False):
+            return
+        session_db.maybe_auto_prune_and_vacuum(
+            retention_days=int(cfg.get("retention_days", 90)),
+            min_interval_hours=int(cfg.get("min_interval_hours", 24)),
+            vacuum=bool(cfg.get("vacuum_after_prune", True)),
+        )
+    except Exception as exc:
+        logger.debug("state.db auto-maintenance skipped: %s", exc)
 
 
 def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
@@ -1961,7 +2017,13 @@ class HermesCLI:
             self._session_db = SessionDB()
         except Exception as e:
             logger.warning("Failed to initialize SessionDB — session will NOT be indexed for search: %s", e)
-        
+
+        # Opportunistic state.db maintenance — runs at most once per
+        # min_interval_hours, tracked via state_meta in state.db itself so
+        # it's shared across all Hermes processes for this HERMES_HOME.
+        # Never blocks startup on failure.
+        _run_state_db_auto_maintenance(self._session_db)
+
         # Deferred title: stored in memory until the session is created in the DB
         self._pending_title: Optional[str] = None
         
