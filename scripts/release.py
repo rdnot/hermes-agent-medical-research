@@ -45,6 +45,7 @@ AUTHOR_MAP = {
     "127238744+teknium1@users.noreply.github.com": "teknium1",
     "343873859@qq.com": "DrStrangerUJN",
     # contributors (from noreply pattern)
+    "david.vv@icloud.com": "davidvv",
     "wangqiang@wangqiangdeMac-mini.local": "xiaoqiang243",
     "snreynolds2506@gmail.com": "snreynolds",
     "35742124+0xbyt4@users.noreply.github.com": "0xbyt4",
@@ -108,8 +109,11 @@ AUTHOR_MAP = {
     "134848055+UNLINEARITY@users.noreply.github.com": "UNLINEARITY",
     "ben.burtenshaw@gmail.com": "burtenshaw",
     "roopaknijhara@gmail.com": "rnijhara",
+    "josephzcan@gmail.com": "j0sephz",
     # contributors (manual mapping from git names)
     "ahmedsherif95@gmail.com": "asheriif",
+    "dyxushuai@gmail.com": "dyxushuai",
+    "33860762+etcircle@users.noreply.github.com": "etcircle",
     "liujinkun@bytedance.com": "liujinkun2025",
     "dmayhem93@gmail.com": "dmahan93",
     "fr@tecompanytea.com": "ifrederico",
@@ -401,6 +405,10 @@ AUTHOR_MAP = {
     "yuanhe@minimaxi.com": "RyanLee-Dev",
     "curtis992250@gmail.com": "TaroballzChen",
     "92638503+Lind3ey@users.noreply.github.com": "Lind3ey",
+    "1352808998@qq.com": "phpoh",
+    "caliberoviv@gmail.com": "vivganes",
+    "michaelfackerell@gmail.com": "MikeFac",
+    "18024642@qq.com": "GuyCui",
 }
 
 
