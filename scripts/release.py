@@ -48,6 +48,7 @@ AUTHOR_MAP = {
     "jefferson@heimdallstrategy.com": "Mind-Dragon",
     "130918800+devorun@users.noreply.github.com": "devorun",
     "maks.mir@yahoo.com": "say8hi",
+    "web3blind@users.noreply.github.com": "web3blind",
     # contributors (from noreply pattern)
     "david.vv@icloud.com": "davidvv",
     "wangqiang@wangqiangdeMac-mini.local": "xiaoqiang243",
@@ -200,6 +201,9 @@ AUTHOR_MAP = {
     "1434494126@qq.com": "5park1e",
     "158153005+5park1e@users.noreply.github.com": "5park1e",
     "innocarpe@gmail.com": "innocarpe",
+    "noreply@ked.com": "qike-ms",
+    "andrekurait@gmail.com": "AndreKurait",
+    "bsgdigital@users.noreply.github.com": "bsgdigital",
     "numman.ali@gmail.com": "nummanali",
     "rohithsaimidigudla@gmail.com": "whitehatjr1001",
     "0xNyk@users.noreply.github.com": "0xNyk",
