@@ -67,12 +67,13 @@ CONFIGURABLE_TOOLSETS = [
     ("messaging",       "📨 Cross-Platform Messaging",  "send_message"),
     ("rl",              "🧪 RL Training",               "Tinker-Atropos training tools"),
     ("homeassistant",    "🏠 Home Assistant",           "smart home device control"),
+    ("spotify",          "🎵 Spotify",                  "playback, search, playlists, library"),
 ]
 
 # Toolsets that are OFF by default for new installs.
 # They're still in _HERMES_CORE_TOOLS (available at runtime if enabled),
 # but the setup checklist won't pre-select them for first-time users.
-_DEFAULT_OFF_TOOLSETS = {"moa", "homeassistant", "rl"}
+_DEFAULT_OFF_TOOLSETS = {"moa", "homeassistant", "rl", "spotify"}
 
 
 def _get_effective_configurable_toolsets():
@@ -361,6 +362,22 @@ TOOL_CATEGORIES = {
             },
         ],
     },
+    "spotify": {
+        "name": "Spotify",
+        "icon": "🎵",
+        "providers": [
+            {
+                "name": "Spotify Web API",
+                "tag": "PKCE OAuth — run `hermes auth spotify` after this",
+                "env_vars": [
+                    {"key": "HERMES_SPOTIFY_CLIENT_ID", "prompt": "Spotify app client_id",
+                     "url": "https://developer.spotify.com/dashboard"},
+                    {"key": "HERMES_SPOTIFY_REDIRECT_URI", "prompt": "Redirect URI (must be allow-listed in your Spotify app)",
+                     "default": "http://127.0.0.1:43827/spotify/callback"},
+                ],
+            },
+        ],
+    },
     "rl": {
         "name": "RL Training",
         "icon": "🧪",
@@ -590,7 +607,10 @@ def _get_platform_tools(
             default_off.remove(platform)
         enabled_toolsets -= default_off
 
-    # Plugin toolsets: enabled by default unless explicitly disabled.
+    # Plugin toolsets: enabled by default unless explicitly disabled, or
+    # unless the toolset is in _DEFAULT_OFF_TOOLSETS (e.g. spotify —
+    # shipped as a bundled plugin but user must opt in via `hermes tools`
+    # so we don't ship 7 Spotify tool schemas to users who don't use it).
     # A plugin toolset is "known" for a platform once `hermes tools`
     # has been saved for that platform (tracked via known_plugin_toolsets).
     # Unknown plugins default to enabled; known-but-absent = disabled.
@@ -602,6 +622,9 @@ def _get_platform_tools(
             if pts in toolset_names:
                 # Explicitly listed in config — enabled
                 enabled_toolsets.add(pts)
+            elif pts in _DEFAULT_OFF_TOOLSETS:
+                # Opt-in plugin toolset — stay off until user picks it
+                continue
             elif pts not in known_for_platform:
                 # New plugin not yet seen by hermes tools — default enabled
                 enabled_toolsets.add(pts)
