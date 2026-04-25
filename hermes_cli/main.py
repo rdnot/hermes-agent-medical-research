@@ -6046,6 +6046,31 @@ def _cmd_update_impl(args, gateway_mode: bool):
             )
             import signal as _signal
 
+            def _wait_for_service_active(
+                scope_cmd_: list, svc_name_: str, timeout: float = 10.0,
+            ) -> bool:
+                """Poll ``systemctl is-active`` until the unit reports active.
+
+                systemd's Stopped -> Started transition after a graceful exit
+                (or a hard restart) is not instantaneous; a one-shot check
+                races that window and falsely reports the unit as down.
+                Poll every 0.5s up to ``timeout`` seconds before giving up.
+                """
+                deadline = _time.monotonic() + max(timeout, 0.5)
+                while True:
+                    try:
+                        _verify = subprocess.run(
+                            scope_cmd_ + ["is-active", svc_name_],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        if _verify.stdout.strip() == "active":
+                            return True
+                    except (FileNotFoundError, subprocess.TimeoutExpired):
+                        pass
+                    if _time.monotonic() >= deadline:
+                        return False
+                    _time.sleep(0.5)
+
             # Drain budget for graceful SIGUSR1 restarts.  The gateway drains
             # for up to ``agent.restart_drain_timeout`` (default 60s) before
             # exiting with code 75; we wait slightly longer so the drain
@@ -6152,14 +6177,14 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
                             if _graceful_ok:
                                 # Gateway exited 75; systemd should relaunch
-                                # via Restart=on-failure.  Verify the new
-                                # process came up.
-                                _time.sleep(3)
-                                verify = subprocess.run(
-                                    scope_cmd + ["is-active", svc_name],
-                                    capture_output=True, text=True, timeout=5,
-                                )
-                                if verify.stdout.strip() == "active":
+                                # via Restart=on-failure.  Poll is-active for
+                                # up to ~10s because the unit's Stopped ->
+                                # Started transition can take a few seconds
+                                # after the old PID exits, and a one-shot
+                                # check races that window.
+                                if _wait_for_service_active(
+                                    scope_cmd, svc_name, timeout=10.0,
+                                ):
                                     restarted_services.append(svc_name)
                                     continue
                                 # Process exited but wasn't respawned (older
@@ -6185,14 +6210,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
                                 # Verify the service actually survived the
                                 # restart.  systemctl restart returns 0 even
                                 # if the new process crashes immediately.
-                                _time.sleep(3)
-                                verify = subprocess.run(
-                                    scope_cmd + ["is-active", svc_name],
-                                    capture_output=True,
-                                    text=True,
-                                    timeout=5,
-                                )
-                                if verify.stdout.strip() == "active":
+                                if _wait_for_service_active(
+                                    scope_cmd, svc_name, timeout=10.0,
+                                ):
                                     restarted_services.append(svc_name)
                                 else:
                                     # Retry once — transient startup failures
@@ -6207,14 +6227,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
                                         text=True,
                                         timeout=15,
                                     )
-                                    _time.sleep(3)
-                                    verify2 = subprocess.run(
-                                        scope_cmd + ["is-active", svc_name],
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=5,
-                                    )
-                                    if verify2.stdout.strip() == "active":
+                                    if _wait_for_service_active(
+                                        scope_cmd, svc_name, timeout=10.0,
+                                    ):
                                         restarted_services.append(svc_name)
                                         print(f"  ✓ {svc_name} recovered on retry")
                                     else:
@@ -6715,9 +6730,15 @@ def cmd_dashboard(args):
     try:
         import fastapi  # noqa: F401
         import uvicorn  # noqa: F401
-    except ImportError:
-        print("Web UI dependencies not installed.")
-        print(f"Install them with:  {sys.executable} -m pip install 'fastapi' 'uvicorn[standard]'")
+    except ImportError as e:
+        print("Web UI dependencies not installed (need fastapi + uvicorn).")
+        print(
+            f"Re-install the package into this interpreter so metadata updates apply:\n"
+            f"  cd {PROJECT_ROOT}\n"
+            f"  {sys.executable} -m pip install -e .\n"
+            "If `pip` is missing in this venv, use:  uv pip install -e ."
+        )
+        print(f"Import error: {e}")
         sys.exit(1)
 
     if "HERMES_WEB_DIST" not in os.environ:
@@ -6726,11 +6747,13 @@ def cmd_dashboard(args):
 
     from hermes_cli.web_server import start_server
 
+    embedded_chat = args.tui or os.environ.get("HERMES_DASHBOARD_TUI") == "1"
     start_server(
         host=args.host,
         port=args.port,
         open_browser=not args.no_open,
         allow_public=getattr(args, "insecure", False),
+        embedded_chat=embedded_chat,
     )
 
 
@@ -8915,6 +8938,14 @@ Examples:
         "--insecure",
         action="store_true",
         help="Allow binding to non-localhost (DANGEROUS: exposes API keys on the network)",
+    )
+    dashboard_parser.add_argument(
+        "--tui",
+        action="store_true",
+        help=(
+            "Expose the in-browser Chat tab (embedded `hermes --tui` via PTY/WebSocket). "
+            "Alternatively set HERMES_DASHBOARD_TUI=1."
+        ),
     )
     dashboard_parser.set_defaults(func=cmd_dashboard)
 
