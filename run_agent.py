@@ -3281,12 +3281,25 @@ class AIAgent:
                 with open(os.devnull, "w") as _devnull, \
                      contextlib.redirect_stdout(_devnull), \
                      contextlib.redirect_stderr(_devnull):
+                    # Inherit the parent agent's live runtime (provider, model,
+                    # base_url, api_key, api_mode) so the fork uses the exact
+                    # same credentials the main turn is using.  Without this,
+                    # AIAgent.__init__ re-runs auto-resolution from env vars,
+                    # which fails for OAuth-only providers, session-scoped
+                    # creds, or credential-pool setups where the resolver can't
+                    # reconstruct auth from scratch -- producing the spurious
+                    # "No LLM provider configured" warning at end of turn.
+                    _parent_runtime = self._current_main_runtime()
                     review_agent = AIAgent(
                         model=self.model,
                         max_iterations=8,
                         quiet_mode=True,
                         platform=self.platform,
                         provider=self.provider,
+                        api_mode=_parent_runtime.get("api_mode") or None,
+                        base_url=_parent_runtime.get("base_url") or None,
+                        api_key=_parent_runtime.get("api_key") or None,
+                        credential_pool=getattr(self, "_credential_pool", None),
                         parent_session_id=self.session_id,
                     )
                     review_agent._memory_write_origin = "background_review"
@@ -7904,7 +7917,17 @@ class AIAgent:
             api_msg["reasoning_content"] = existing
             return
 
-        # 2. DeepSeek / Kimi thinking mode: tool-call turns that lack
+        # 2. Healthy session: promote 'reasoning' field to 'reasoning_content'
+        # for providers that use the internal 'reasoning' key.
+        # This must happen BEFORE the DeepSeek/Kimi tool-call check so that
+        # genuine reasoning content is not overwritten by the empty-string
+        # fallback (#15812 regression in PR #15478).
+        normalized_reasoning = source_msg.get("reasoning")
+        if isinstance(normalized_reasoning, str) and normalized_reasoning:
+            api_msg["reasoning_content"] = normalized_reasoning
+            return
+
+        # 3. DeepSeek / Kimi thinking mode: tool-call turns that lack
         # reasoning_content are "poisoned history" — a prior provider (MiniMax,
         # etc.) left them empty. DeepSeek returns HTTP 400 if reasoning_content
         # is absent on replay; inject "" to satisfy the provider's requirement
@@ -7918,13 +7941,6 @@ class AIAgent:
         )
         if needs_empty_reasoning:
             api_msg["reasoning_content"] = ""
-            return
-
-        # 3. Healthy session: promote 'reasoning' field to 'reasoning_content'
-        # for providers that use the internal 'reasoning' key.
-        normalized_reasoning = source_msg.get("reasoning")
-        if isinstance(normalized_reasoning, str) and normalized_reasoning:
-            api_msg["reasoning_content"] = normalized_reasoning
             return
 
         # 4. DeepSeek / Kimi thinking mode: all assistant messages need

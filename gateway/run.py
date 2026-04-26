@@ -591,20 +591,20 @@ def _parse_session_key(session_key: str) -> "dict | None":
 
 
 def _format_gateway_process_notification(evt: dict) -> "str | None":
-    """Format a watch pattern event from completion_queue into a [SYSTEM:] message."""
+    """Format a watch pattern event from completion_queue into a [IMPORTANT:] message."""
     evt_type = evt.get("type", "completion")
     _sid = evt.get("session_id", "unknown")
     _cmd = evt.get("command", "unknown")
 
     if evt_type == "watch_disabled":
-        return f"[SYSTEM: {evt.get('message', '')}]"
+        return f"[IMPORTANT: {evt.get('message', '')}]"
 
     if evt_type == "watch_match":
         _pat = evt.get("pattern", "?")
         _out = evt.get("output", "")
         _sup = evt.get("suppressed", 0)
         text = (
-            f"[SYSTEM: Background process {_sid} matched "
+            f"[IMPORTANT: Background process {_sid} matched "
             f"watch pattern \"{_pat}\".\n"
             f"Command: {_cmd}\n"
             f"Matched output:\n{_out}"
@@ -4232,7 +4232,7 @@ class GatewayRunner:
                     if _loaded:
                         _loaded_skill, _skill_dir, _display_name = _loaded
                         _note = (
-                            f'[SYSTEM: The "{_display_name}" skill is auto-loaded. '
+                            f'[IMPORTANT: The "{_display_name}" skill is auto-loaded. '
                             f"Follow its instructions for this session.]"
                         )
                         _part = _build_skill_message(_loaded_skill, _skill_dir, _note)
@@ -7473,7 +7473,7 @@ class GatewayRunner:
             change_detail = ". ".join(change_parts) + ". " if change_parts else ""
             reload_msg = {
                 "role": "user",
-                "content": f"[SYSTEM: MCP servers have been reloaded. {change_detail}{tool_summary}. The tool list for this conversation has been updated accordingly.]",
+                "content": f"[IMPORTANT: MCP servers have been reloaded. {change_detail}{tool_summary}. The tool list for this conversation has been updated accordingly.]",
             }
             try:
                 session_entry = self.session_store.get_or_create_session(event.source)
@@ -8412,7 +8412,7 @@ class GatewayRunner:
                     from tools.ansi_strip import strip_ansi
                     _out = strip_ansi(session.output_buffer[-2000:]) if session.output_buffer else ""
                     synth_text = (
-                        f"[SYSTEM: Background process {session_id} completed "
+                        f"[IMPORTANT: Background process {session_id} completed "
                         f"(exit code {session.exit_code}).\n"
                         f"Command: {session.command}\n"
                         f"Output:\n{_out}]"
@@ -8721,6 +8721,25 @@ class GatewayRunner:
         if _lock:
             with _lock:
                 self._agent_cache.pop(session_key, None)
+
+    @staticmethod
+    def _init_cached_agent_for_turn(agent: Any, interrupt_depth: int) -> None:
+        """Reset per-turn state on a cached agent before a new turn starts.
+
+        Both _last_activity_ts and _last_activity_desc are only reset for
+        fresh external turns (depth 0); they are semantically paired —
+        desc describes the activity *at* ts, so updating one without the
+        other would make get_activity_summary() misleading.
+        For interrupt-recursive turns both are preserved so the inactivity
+        watchdog can accumulate stuck-turn idle time and fire the 30-min
+        timeout (#15654).  The depth-0 reset is still needed: a session
+        idle for 29 min would otherwise trip the watchdog before the new
+        turn makes its first API call (#9051).
+        """
+        if interrupt_depth == 0:
+            agent._last_activity_ts = time.time()
+            agent._last_activity_desc = "starting new turn (cached)"
+        agent._api_call_count = 0
 
     def _release_evicted_agent_soft(self, agent: Any) -> None:
         """Soft cleanup for cache-evicted agents — preserves session tool state.
@@ -9766,12 +9785,7 @@ class GatewayRunner:
                                 _cache.move_to_end(session_key)
                             except KeyError:
                                 pass
-                        # Reset activity timestamp so the inactivity timeout
-                        # handler doesn't see stale idle time from the previous
-                        # turn and immediately kill this agent.  (#9051)
-                        agent._last_activity_ts = time.time()
-                        agent._last_activity_desc = "starting new turn (cached)"
-                        agent._api_call_count = 0
+                        self._init_cached_agent_for_turn(agent, _interrupt_depth)
                         logger.debug("Reusing cached agent for session %s", session_key)
 
             if agent is None:
