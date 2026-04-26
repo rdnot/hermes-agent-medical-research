@@ -356,6 +356,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=(),
         base_url_env_var="BEDROCK_BASE_URL",
     ),
+    "azure-foundry": ProviderConfig(
+        id="azure-foundry",
+        name="Azure Foundry",
+        auth_type="api_key",
+        inference_base_url="",  # User-provided endpoint
+        api_key_env_vars=("AZURE_FOUNDRY_API_KEY",),
+        base_url_env_var="AZURE_FOUNDRY_BASE_URL",
+    ),
 }
 
 
@@ -4236,10 +4244,10 @@ def _login_nous(args, pconfig: ProviderConfig) -> None:
                 )
 
             from hermes_cli.models import (
-                _PROVIDER_MODELS, get_pricing_for_provider,
+                get_curated_nous_model_ids, get_pricing_for_provider,
                 check_nous_free_tier, partition_nous_models_by_tier,
             )
-            model_ids = _PROVIDER_MODELS.get("nous", [])
+            model_ids = get_curated_nous_model_ids()
 
             print()
             unavailable_models: list = []
