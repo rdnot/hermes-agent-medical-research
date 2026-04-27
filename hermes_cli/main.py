@@ -6142,6 +6142,96 @@ def _ensure_fhs_path_guard() -> None:
         print("    (reload your shell or run 'source ~/.bashrc' to pick it up)")
 
 
+def _run_pre_update_backup(args) -> None:
+    """Create a full zip backup of HERMES_HOME before running the update.
+
+    Gated on ``updates.pre_update_backup`` in config (default false).  Off
+    by default because the zip can add minutes to every update on large
+    HERMES_HOME directories.  The ``--backup`` flag on ``hermes update``
+    opts in for a single run; ``--no-backup`` forces it off when config
+    has it enabled.  Never raises — a backup failure should not block the
+    update itself.
+    """
+    # CLI flags win over config.  --no-backup beats --backup if both are set.
+    if getattr(args, "no_backup", False):
+        print("◆ Pre-update backup: skipped (--no-backup)")
+        print()
+        return
+
+    force_backup = bool(getattr(args, "backup", False))
+
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+    except Exception as exc:
+        logging.getLogger(__name__).debug("Could not load config for pre-update backup: %s", exc)
+        cfg = {}
+
+    updates_cfg = cfg.get("updates", {}) if isinstance(cfg, dict) else {}
+    enabled = updates_cfg.get("pre_update_backup", False)
+    keep = updates_cfg.get("backup_keep", 5)
+
+    if not enabled and not force_backup:
+        # Silent by default — the backup is off, most users don't need to
+        # hear about it on every update.  They can opt in via --backup
+        # or by flipping the config knob.
+        return
+
+    try:
+        from hermes_cli.backup import create_pre_update_backup
+    except Exception as exc:
+        print(f"⚠ Pre-update backup: could not load backup module ({exc}); continuing update.")
+        print()
+        return
+
+    print("◆ Creating pre-update backup...")
+    t0 = _time.monotonic()
+    try:
+        out_path = create_pre_update_backup(keep=int(keep))
+    except Exception as exc:  # defensive — helper already swallows, but just in case
+        print(f"  ⚠ Backup failed: {exc}")
+        print("  Continuing with update.")
+        print()
+        return
+
+    elapsed = _time.monotonic() - t0
+
+    if out_path is None:
+        print("  ⚠ Backup skipped (no files found or write failed); continuing update.")
+        print()
+        return
+
+    try:
+        size_bytes = out_path.stat().st_size
+    except OSError:
+        size_bytes = 0
+
+    # Human-readable size
+    size_str = f"{size_bytes} B"
+    for unit in ("KB", "MB", "GB"):
+        if size_bytes < 1024:
+            break
+        size_bytes /= 1024
+        size_str = f"{size_bytes:.1f} {unit}"
+
+    # Render path using display_hermes_home so the user sees ~/.hermes/...
+    try:
+        from hermes_constants import get_hermes_home, display_hermes_home
+        home = get_hermes_home()
+        try:
+            display_path = f"{display_hermes_home()}/{out_path.relative_to(home)}"
+        except ValueError:
+            display_path = str(out_path)
+    except Exception:
+        display_path = str(out_path)
+
+    print(f"  Saved:    {display_path} ({size_str}, {elapsed:.1f}s)")
+    print(f"  Restore:  hermes import {out_path}")
+    print(f"  Disable:  omit --backup (backups are off by default)")
+    print(f"            set updates.pre_update_backup: false in config.yaml")
+    print()
+
+
 def cmd_update(args):
     """Update Hermes Agent to the latest version.
 
@@ -6183,6 +6273,10 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
     print("⚕ Updating Hermes Agent...")
     print()
+
+    # Pre-update backup — runs before any git/file mutation so users can
+    # always roll back to the exact state they had before this update.
+    _run_pre_update_backup(args)
 
     # Try git-based update first, fall back to ZIP download on Windows
     # when git file I/O is broken (antivirus, NTFS filter drivers, etc.)
@@ -9576,6 +9670,18 @@ Examples:
         action="store_true",
         default=False,
         help="Check whether an update is available without installing anything",
+    )
+    update_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        default=False,
+        help="Skip the pre-update backup for this run (overrides updates.pre_update_backup)",
+    )
+    update_parser.add_argument(
+        "--backup",
+        action="store_true",
+        default=False,
+        help="Force a pre-update backup for this run (off by default; overrides updates.pre_update_backup)",
     )
     update_parser.set_defaults(func=cmd_update)
 
