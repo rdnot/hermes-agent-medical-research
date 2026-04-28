@@ -6000,6 +6000,7 @@ class HermesCLI:
             platform_status = {
                 Platform.TELEGRAM: ("Telegram", "TELEGRAM_BOT_TOKEN"),
                 Platform.DISCORD: ("Discord", "DISCORD_BOT_TOKEN"),
+                Platform.SLACK: ("Slack", "SLACK_BOT_TOKEN"),
                 Platform.WHATSAPP: ("WhatsApp", "WHATSAPP_ENABLED"),
             }
             
@@ -8813,6 +8814,13 @@ class HermesCLI:
                         response,
                         self.conversation_history,
                         failure_callback=_title_failure_cb,
+                        main_runtime={
+                            "model": self.model,
+                            "provider": self.provider,
+                            "base_url": self.base_url,
+                            "api_key": self.api_key,
+                            "api_mode": self.api_mode,
+                        },
                     )
                 except Exception:
                     pass
