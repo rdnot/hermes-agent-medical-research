@@ -523,9 +523,6 @@ def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
 
     Returns dict with {accessToken, refreshToken?, expiresAt?} or None.
     """
-    import platform
-    import subprocess
-
     if platform.system() != "Darwin":
         return None
 
@@ -1117,6 +1114,33 @@ def _sanitize_tool_id(tool_id: str) -> str:
     return sanitized or "tool_0"
 
 
+def _normalize_tool_input_schema(schema: Any) -> Dict[str, Any]:
+    """Normalize tool schemas before sending them to Anthropic.
+
+    Anthropic's tool schema validator rejects nullable unions such as
+    ``anyOf: [{"type": "string"}, {"type": "null"}]`` that Pydantic/MCP
+    commonly emits for optional fields. Tool optionality is represented by
+    the parent ``required`` array, so we delegate to the shared
+    ``strip_nullable_unions`` helper to collapse nullable unions to the
+    non-null branch while preserving metadata like description/default.
+
+    ``keep_nullable_hint=False`` because the Anthropic validator does not
+    recognize the OpenAPI-style ``nullable: true`` extension and strict
+    schema-to-grammar converters may reject unknown keywords.
+    """
+    if not schema:
+        return {"type": "object", "properties": {}}
+
+    from tools.schema_sanitizer import strip_nullable_unions
+
+    normalized = strip_nullable_unions(schema, keep_nullable_hint=False)
+    if not isinstance(normalized, dict):
+        return {"type": "object", "properties": {}}
+    if normalized.get("type") == "object" and not isinstance(normalized.get("properties"), dict):
+        normalized = {**normalized, "properties": {}}
+    return normalized
+
+
 def convert_tools_to_anthropic(tools: List[Dict]) -> List[Dict]:
     """Convert OpenAI tool definitions to Anthropic format."""
     if not tools:
@@ -1127,7 +1151,9 @@ def convert_tools_to_anthropic(tools: List[Dict]) -> List[Dict]:
         result.append({
             "name": fn.get("name", ""),
             "description": fn.get("description", ""),
-            "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+            "input_schema": _normalize_tool_input_schema(
+                fn.get("parameters", {"type": "object", "properties": {}})
+            ),
         })
     return result
 

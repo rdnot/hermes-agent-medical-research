@@ -2720,7 +2720,6 @@ class AIAgent:
         eff_api_mode = api_mode if api_mode is not None else (self.api_mode or "")
         eff_model = (model if model is not None else self.model) or ""
 
-        base_lower = eff_base_url.lower()
         model_lower = eff_model.lower()
         provider_lower = eff_provider.lower()
         is_claude = "claude" in model_lower
@@ -8130,6 +8129,7 @@ class AIAgent:
             supports_reasoning=self._supports_reasoning_extra_body(),
             github_reasoning_extra=self._github_models_reasoning_extra_body() if _is_gh else None,
             anthropic_max_output=_ant_max,
+            provider_name=self.provider,
         )
 
     def _supports_reasoning_extra_body(self) -> bool:
