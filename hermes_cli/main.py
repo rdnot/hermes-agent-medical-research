@@ -5274,12 +5274,20 @@ def _warn_stale_dashboard_processes() -> None:
 
     try:
         if sys.platform == "win32":
+            # wmic may emit text in the system code page (for example cp936
+            # on zh-CN systems), not UTF-8. In text mode, subprocess output
+            # decoding depends on Python's configuration (locale-dependent
+            # by default, or UTF-8 in UTF-8 mode). The important protection
+            # here is errors="ignore": it prevents a reader-thread
+            # UnicodeDecodeError from leaving result.stdout=None and turning
+            # the later .split() into an AttributeError (#17049).
             result = subprocess.run(
                 ["wmic", "process", "get", "ProcessId,CommandLine",
                  "/FORMAT:LIST"],
                 capture_output=True, text=True, timeout=10,
+                encoding="utf-8", errors="ignore",
             )
-            if result.returncode != 0:
+            if result.returncode != 0 or result.stdout is None:
                 return
             current_cmd = ""
             for line in result.stdout.split("\n"):
