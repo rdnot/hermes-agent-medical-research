@@ -293,6 +293,19 @@ describe('createGatewayEventHandler', () => {
     expect(appended[1]).toMatchObject({ role: 'assistant', text: 'final answer' })
   })
 
+  it('renders browser.progress events as system transcript lines as they stream in', () => {
+    const appended: Msg[] = []
+    const ctx = buildCtx(appended)
+    const handler = createGatewayEventHandler(ctx)
+
+    handler({
+      payload: { message: 'Chrome launched and listening on port 9222' },
+      type: 'browser.progress'
+    } as any)
+
+    expect(ctx.system.sys).toHaveBeenCalledWith('Chrome launched and listening on port 9222')
+  })
+
   it('annotates gateway.start_timeout with stderr tail lines so users can diagnose without /logs', () => {
     const appended: Msg[] = []
     const onEvent = createGatewayEventHandler(buildCtx(appended))
@@ -714,9 +727,7 @@ describe('createGatewayEventHandler', () => {
       } as any)
 
       // Pre-interrupt todos should land in turn state.
-      expect(getTurnState().todos).toEqual([
-        { content: 'pre-interrupt', id: 'todo-1', status: 'pending' }
-      ])
+      expect(getTurnState().todos).toEqual([{ content: 'pre-interrupt', id: 'todo-1', status: 'pending' }])
 
       turnController.interruptTurn({
         appendMessage: (msg: Msg) => appended.push(msg),
