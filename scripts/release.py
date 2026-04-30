@@ -117,6 +117,7 @@ AUTHOR_MAP = {
     "abner.the.foreman@agentmail.to": "Abnertheforeman",
     "adam.manning@pro-serveinc.com": "amanning3390",
     "thomasgeorgevii09@gmail.com": "tochukwuada",
+    "sb@wmc.sh": "zicochaos",
     "harryykyle1@gmail.com": "hharry11",
     "kshitijk4poor@gmail.com": "kshitijk4poor",
     "1294707+Tosko4@users.noreply.github.com": "Tosko4",
@@ -617,6 +618,7 @@ AUTHOR_MAP = {
     "nfb0408@163.com": "ningfangbin",
     "164839249+Joseph19820124@users.noreply.github.com": "Joseph19820124",
     "rugved@lmstudio.ai": "rugvedS07",
+    "44333070+Heltman@users.noreply.github.com": "Heltman",
 }
 
 
