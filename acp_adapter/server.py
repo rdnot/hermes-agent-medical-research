@@ -164,6 +164,8 @@ class HermesACPAgent(acp.Agent):
         "context": "Show conversation context info",
         "reset": "Clear conversation history",
         "compact": "Compress conversation context",
+        "steer": "Inject guidance into the currently running agent turn",
+        "queue": "Queue a prompt to run after the current turn finishes",
         "version": "Show Hermes version",
     }
 
@@ -192,6 +194,16 @@ class HermesACPAgent(acp.Agent):
         {
             "name": "compact",
             "description": "Compress conversation context",
+        },
+        {
+            "name": "steer",
+            "description": "Inject guidance into the currently running agent turn",
+            "input_hint": "guidance for the active turn",
+        },
+        {
+            "name": "queue",
+            "description": "Queue a prompt to run after the current turn finishes",
+            "input_hint": "prompt to run next",
         },
         {
             "name": "version",
@@ -557,6 +569,9 @@ class HermesACPAgent(acp.Agent):
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
         state = self.session_manager.get_session(session_id)
         if state and state.cancel_event:
+            with state.runtime_lock:
+                if state.is_running and state.current_prompt_text:
+                    state.interrupted_prompt_text = state.current_prompt_text
             state.cancel_event.set()
             try:
                 if getattr(state, "agent", None) and hasattr(state.agent, "interrupt"):
@@ -654,6 +669,25 @@ class HermesACPAgent(acp.Agent):
         if not has_content:
             return PromptResponse(stop_reason="end_turn")
 
+        # Zed currently interrupts an active ACP request before delivering a
+        # follow-up slash command. If that follow-up is /steer, there may be no
+        # live AIAgent left to steer by the time this method runs. Salvage that
+        # UX by replaying the interrupted prompt with the steer text attached as
+        # explicit correction/guidance.
+        if isinstance(user_content, str) and user_text.startswith("/steer"):
+            steer_text = user_text.split(maxsplit=1)[1].strip() if len(user_text.split(maxsplit=1)) > 1 else ""
+            interrupted_prompt = ""
+            with state.runtime_lock:
+                if not state.is_running and steer_text and state.interrupted_prompt_text:
+                    interrupted_prompt = state.interrupted_prompt_text
+                    state.interrupted_prompt_text = ""
+            if interrupted_prompt:
+                user_text = (
+                    f"{interrupted_prompt}\n\n"
+                    f"User correction/guidance after interrupt: {steer_text}"
+                )
+                user_content = user_text
+
         # Intercept slash commands — handle locally without calling the LLM.
         # Slash commands are text-only; if the client included images/resources,
         # send the whole multimodal prompt to the agent instead of treating it as
@@ -665,6 +699,24 @@ class HermesACPAgent(acp.Agent):
                     update = acp.update_agent_message_text(response_text)
                     await self._conn.session_update(session_id, update)
                 return PromptResponse(stop_reason="end_turn")
+
+        # If Zed sends another regular prompt while the same ACP session is
+        # still running, queue it instead of racing two AIAgent loops against
+        # the same state.history. /steer and /queue are handled above and can
+        # land immediately.
+        with state.runtime_lock:
+            if state.is_running:
+                queued_text = user_text or "[Image attachment]"
+                state.queued_prompts.append(queued_text)
+                depth = len(state.queued_prompts)
+                if self._conn:
+                    update = acp.update_agent_message_text(
+                        f"Queued for the next turn. ({depth} queued)"
+                    )
+                    await self._conn.session_update(session_id, update)
+                return PromptResponse(stop_reason="end_turn")
+            state.is_running = True
+            state.current_prompt_text = user_text or "[Image attachment]"
 
         logger.info("Prompt on session %s: %s", session_id, user_text[:100])
 
@@ -777,6 +829,9 @@ class HermesACPAgent(acp.Agent):
             result = await loop.run_in_executor(_executor, ctx.run, _run_agent)
         except Exception:
             logger.exception("Executor error for session %s", session_id)
+            with state.runtime_lock:
+                state.is_running = False
+                state.current_prompt_text = ""
             return PromptResponse(stop_reason="end_turn")
 
         if result.get("messages"):
@@ -801,6 +856,28 @@ class HermesACPAgent(acp.Agent):
         if final_response and conn:
             update = acp.update_agent_message_text(final_response)
             await conn.session_update(session_id, update)
+
+        # Mark this turn idle before draining queued work so recursive prompt()
+        # calls can acquire the session. Queued turns are intentionally run as
+        # normal follow-up user prompts, preserving role alternation and history.
+        with state.runtime_lock:
+            state.is_running = False
+            state.current_prompt_text = ""
+
+        while True:
+            with state.runtime_lock:
+                if not state.queued_prompts:
+                    break
+                next_prompt = state.queued_prompts.pop(0)
+            if conn:
+                await conn.session_update(
+                    session_id,
+                    acp.update_user_message_text(next_prompt),
+                )
+            await self.prompt(
+                prompt=[TextContentBlock(type="text", text=next_prompt)],
+                session_id=session_id,
+            )
 
         usage = None
         if any(result.get(key) is not None for key in ("prompt_tokens", "completion_tokens", "total_tokens")):
@@ -879,6 +956,8 @@ class HermesACPAgent(acp.Agent):
             "context": self._cmd_context,
             "reset": self._cmd_reset,
             "compact": self._cmd_compact,
+            "steer": self._cmd_steer,
+            "queue": self._cmd_queue,
             "version": self._cmd_version,
         }.get(cmd)
 
@@ -1005,6 +1084,34 @@ class HermesACPAgent(acp.Agent):
             )
         except Exception as e:
             return f"Compression failed: {e}"
+
+    def _cmd_steer(self, args: str, state: SessionState) -> str:
+        steer_text = args.strip()
+        if not steer_text:
+            return "Usage: /steer <guidance>"
+
+        if state.is_running and hasattr(state.agent, "steer"):
+            try:
+                if state.agent.steer(steer_text):
+                    preview = steer_text[:80] + ("..." if len(steer_text) > 80 else "")
+                    return f"⏩ Steer queued for the active turn: {preview}"
+            except Exception as exc:
+                logger.warning("ACP steer failed for session %s: %s", state.session_id, exc)
+                return f"⚠️ Steer failed: {exc}"
+
+        with state.runtime_lock:
+            state.queued_prompts.append(steer_text)
+            depth = len(state.queued_prompts)
+        return f"No active turn — queued for the next turn. ({depth} queued)"
+
+    def _cmd_queue(self, args: str, state: SessionState) -> str:
+        queued_text = args.strip()
+        if not queued_text:
+            return "Usage: /queue <prompt>"
+        with state.runtime_lock:
+            state.queued_prompts.append(queued_text)
+            depth = len(state.queued_prompts)
+        return f"Queued for the next turn. ({depth} queued)"
 
     def _cmd_version(self, args: str, state: SessionState) -> str:
         return f"Hermes Agent v{HERMES_VERSION}"

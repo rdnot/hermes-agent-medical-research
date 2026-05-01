@@ -1742,7 +1742,10 @@ class GatewayRunner:
             if cfg_path.exists():
                 with open(cfg_path, encoding="utf-8") as _f:
                     cfg = _y.safe_load(_f) or {}
-                return bool(cfg_get(cfg, "display", "show_reasoning", default=False))
+                return is_truthy_value(
+                    cfg_get(cfg, "display", "show_reasoning"),
+                    default=False,
+                )
         except Exception:
             pass
         return False
@@ -8351,7 +8354,10 @@ class GatewayRunner:
         # --- check config gate ------------------------------------------------
         try:
             user_config = _load_gateway_config()
-            gate_enabled = cfg_get(user_config, "display", "tool_progress_command", default=False)
+            gate_enabled = is_truthy_value(
+                cfg_get(user_config, "display", "tool_progress_command"),
+                default=False,
+            )
         except Exception:
             gate_enabled = False
 
@@ -8794,8 +8800,12 @@ class GatewayRunner:
                     tool_name=msg.get("tool_name") or msg.get("name"),
                     tool_calls=msg.get("tool_calls"),
                     tool_call_id=msg.get("tool_call_id"),
+                    finish_reason=msg.get("finish_reason"),
                     reasoning=msg.get("reasoning"),
                     reasoning_content=msg.get("reasoning_content"),
+                    reasoning_details=msg.get("reasoning_details"),
+                    codex_reasoning_items=msg.get("codex_reasoning_items"),
+                    codex_message_items=msg.get("codex_message_items"),
                 )
             except Exception:
                 pass  # Best-effort copy
@@ -11298,7 +11308,10 @@ class GatewayRunner:
                             tool_progress_hint_gateway,
                         )
                         _cfg = _load_gateway_config()
-                        gate_on = bool(cfg_get(_cfg, "display", "tool_progress_command", default=False))
+                        gate_on = is_truthy_value(
+                            cfg_get(_cfg, "display", "tool_progress_command"),
+                            default=False,
+                        )
                         if gate_on and not is_seen(_cfg, TOOL_PROGRESS_FLAG):
                             long_tool_hint_fired[0] = True
                             progress_queue.put(tool_progress_hint_gateway())
