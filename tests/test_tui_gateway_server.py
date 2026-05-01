@@ -59,6 +59,28 @@ def test_write_json_returns_false_on_broken_pipe(monkeypatch):
     assert server.write_json({"ok": True}) is False
 
 
+def test_dispatch_rejects_non_object_request():
+    resp = server.dispatch([])
+
+    assert resp == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32600, "message": "invalid request: expected an object"},
+    }
+
+
+def test_dispatch_rejects_non_object_params():
+    resp = server.dispatch(
+        {"id": "1", "method": "session.create", "params": []}
+    )
+
+    assert resp == {
+        "jsonrpc": "2.0",
+        "id": "1",
+        "error": {"code": -32602, "message": "invalid params: expected an object"},
+    }
+
+
 def test_load_enabled_toolsets_prefers_tui_env(monkeypatch):
     monkeypatch.setenv("HERMES_TUI_TOOLSETS", "web, terminal, ,memory")
 
@@ -115,7 +137,10 @@ def test_load_enabled_toolsets_rejects_disabled_mcp_env(monkeypatch, capsys):
     )
     monkeypatch.setattr(config_mod, "load_config", lambda: {"platform_toolsets": {"cli": ["memory"]}})
 
-    assert server._load_enabled_toolsets() == ["memory"]
+    # Sorted: ["kanban", "memory"]. `kanban` is auto-recovered by
+    # _get_platform_tools because it's a non-configurable platform toolset
+    # whose tools live in hermes-cli's universe (see toolsets.py).
+    assert server._load_enabled_toolsets() == ["kanban", "memory"]
     err = capsys.readouterr().err
     assert "ignoring disabled MCP servers" in err
     assert "mcp-off" in err
@@ -134,7 +159,7 @@ def test_load_enabled_toolsets_falls_back_when_tui_env_invalid(monkeypatch, caps
 
     monkeypatch.setattr(config_mod, "load_config", lambda: {"platform_toolsets": {"cli": ["memory"]}})
 
-    assert server._load_enabled_toolsets() == ["memory"]
+    assert server._load_enabled_toolsets() == ["kanban", "memory"]
     assert "using configured CLI toolsets" in capsys.readouterr().err
 
 
