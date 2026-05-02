@@ -734,6 +734,10 @@ class SlackAdapter(BasePlatformAdapter):
 
                 last_result = await self._get_client(chat_id).chat_postMessage(**kwargs)
 
+            # Clear Slack Assistant status as soon as the final message is posted.
+            if thread_ts:
+                await self.stop_typing(chat_id)
+
             # Track the sent message ts so we can auto-respond to thread
             # replies without requiring @mention.
             sent_ts = last_result.get("ts") if last_result else None
@@ -811,6 +815,8 @@ class SlackAdapter(BasePlatformAdapter):
                 ts=message_id,
                 text=formatted,
             )
+            if finalize:
+                await self.stop_typing(chat_id)
             return SendResult(success=True, message_id=message_id)
         except Exception as e:  # pragma: no cover - defensive logging
             logger.error(
@@ -851,7 +857,7 @@ class SlackAdapter(BasePlatformAdapter):
             # in an assistant-enabled context. Falls back to reactions.
             logger.debug("[Slack] assistant.threads.setStatus failed: %s", e)
 
-    async def stop_typing(self, chat_id: str) -> None:
+    async def stop_typing(self, chat_id: str, metadata=None) -> None:
         """Clear the assistant thread status indicator."""
         if not self._app:
             return
@@ -2695,9 +2701,14 @@ class SlackAdapter(BasePlatformAdapter):
             # gateway command dispatcher by prepending the slash.
             text = f"/{slash_name} {text}".strip()
 
+        # Slack slash commands can originate from DMs or shared channels.
+        # Preserve DM semantics only for DM channel IDs; shared channels must
+        # keep group semantics so different users do not collide into one
+        # session key.
+        is_dm = str(channel_id).startswith("D")
         source = self.build_source(
             chat_id=channel_id,
-            chat_type="dm",  # Slash commands are always in DM-like context
+            chat_type="dm" if is_dm else "group",
             user_id=user_id,
         )
 
@@ -2888,6 +2899,13 @@ class SlackAdapter(BasePlatformAdapter):
             raw = os.getenv("SLACK_FREE_RESPONSE_CHANNELS", "")
         if isinstance(raw, list):
             return {str(part).strip() for part in raw if str(part).strip()}
-        if isinstance(raw, str) and raw.strip():
-            return {part.strip() for part in raw.split(",") if part.strip()}
+        # Coerce non-list scalars (str/int/float) to str before splitting.
+        # A bare numeric YAML value (`free_response_channels: 1234567890`) is
+        # loaded as int and was previously falling through the isinstance(str)
+        # branch to return an empty set.  str() here accepts whatever scalar
+        # the YAML loader hands us without changing existing string/CSV
+        # semantics.
+        s = str(raw).strip() if raw is not None else ""
+        if s:
+            return {part.strip() for part in s.split(",") if part.strip()}
         return set()

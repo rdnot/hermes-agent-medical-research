@@ -93,6 +93,46 @@ def _redirect_cache(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# TestSlashCommandSessionIsolation
+# ---------------------------------------------------------------------------
+
+class TestSlashCommandSessionIsolation:
+    @pytest.mark.asyncio
+    async def test_channel_slash_command_uses_group_session_semantics(self, adapter):
+        command = {
+            "text": "hello",
+            "user_id": "U123",
+            "channel_id": "C123",
+            "team_id": "T123",
+        }
+
+        await adapter._handle_slash_command(command)
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.source.chat_type == "group"
+        assert event.source.chat_id == "C123"
+        assert event.source.user_id == "U123"
+
+    @pytest.mark.asyncio
+    async def test_dm_slash_command_keeps_dm_session_semantics(self, adapter):
+        command = {
+            "text": "hello",
+            "user_id": "U123",
+            "channel_id": "D123",
+            "team_id": "T123",
+        }
+
+        await adapter._handle_slash_command(command)
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.source.chat_type == "dm"
+        assert event.source.chat_id == "D123"
+        assert event.source.user_id == "U123"
+
+
+# ---------------------------------------------------------------------------
 # TestAppMentionHandler
 # ---------------------------------------------------------------------------
 
@@ -1112,6 +1152,104 @@ class TestSendTyping:
             thread_ts="fallback_ts",
             status="is thinking...",
         )
+
+    @pytest.mark.asyncio
+    async def test_stop_typing_clears_tracked_thread(self, adapter):
+        adapter._app.client.assistant_threads_setStatus = AsyncMock()
+        await adapter.send_typing("C123", metadata={"thread_id": "parent_ts"})
+
+        await adapter.stop_typing("C123", metadata={"thread_id": "parent_ts"})
+
+        assert adapter._app.client.assistant_threads_setStatus.call_args_list[1] == call(
+            channel_id="C123",
+            thread_ts="parent_ts",
+            status="",
+        )
+        assert "C123" not in adapter._active_status_threads
+
+    @pytest.mark.asyncio
+    async def test_stop_typing_noop_without_tracked_thread(self, adapter):
+        adapter._app.client.assistant_threads_setStatus = AsyncMock()
+
+        await adapter.stop_typing("C123")
+
+        adapter._app.client.assistant_threads_setStatus.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stop_typing_handles_api_error_gracefully(self, adapter):
+        adapter._active_status_threads["C123"] = "parent_ts"
+        adapter._app.client.assistant_threads_setStatus = AsyncMock(
+            side_effect=Exception("missing_scope")
+        )
+
+        await adapter.stop_typing("C123")
+
+        adapter._app.client.assistant_threads_setStatus.assert_called_once_with(
+            channel_id="C123",
+            thread_ts="parent_ts",
+            status="",
+        )
+        assert "C123" not in adapter._active_status_threads
+
+    @pytest.mark.asyncio
+    async def test_send_clears_status_after_final_post(self, adapter):
+        adapter._app.client.chat_postMessage = AsyncMock(return_value={"ts": "reply_ts"})
+        adapter._app.client.assistant_threads_setStatus = AsyncMock()
+        adapter._active_status_threads["C123"] = "parent_ts"
+
+        result = await adapter.send("C123", "done", metadata={"thread_id": "parent_ts"})
+
+        assert result.success
+        adapter._app.client.chat_postMessage.assert_called_once()
+        adapter._app.client.assistant_threads_setStatus.assert_called_once_with(
+            channel_id="C123",
+            thread_ts="parent_ts",
+            status="",
+        )
+        assert "C123" not in adapter._active_status_threads
+
+    @pytest.mark.asyncio
+    async def test_streaming_final_edit_clears_status(self, adapter):
+        adapter._app.client.chat_update = AsyncMock()
+        adapter._app.client.assistant_threads_setStatus = AsyncMock()
+        adapter._active_status_threads["C123"] = "parent_ts"
+
+        result = await adapter.edit_message(
+            "C123",
+            "reply_ts",
+            "done",
+            finalize=True,
+        )
+
+        assert result.success
+        adapter._app.client.chat_update.assert_called_once_with(
+            channel="C123",
+            ts="reply_ts",
+            text="done",
+        )
+        adapter._app.client.assistant_threads_setStatus.assert_called_once_with(
+            channel_id="C123",
+            thread_ts="parent_ts",
+            status="",
+        )
+        assert "C123" not in adapter._active_status_threads
+
+    @pytest.mark.asyncio
+    async def test_streaming_intermediate_edit_keeps_status(self, adapter):
+        adapter._app.client.chat_update = AsyncMock()
+        adapter._app.client.assistant_threads_setStatus = AsyncMock()
+        adapter._active_status_threads["C123"] = "parent_ts"
+
+        result = await adapter.edit_message(
+            "C123",
+            "reply_ts",
+            "partial",
+            finalize=False,
+        )
+
+        assert result.success
+        adapter._app.client.assistant_threads_setStatus.assert_not_called()
+        assert adapter._active_status_threads["C123"] == "parent_ts"
 
 
 # ---------------------------------------------------------------------------
