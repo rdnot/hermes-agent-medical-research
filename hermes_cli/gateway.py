@@ -237,6 +237,26 @@ def _graceful_restart_via_sigusr1(pid: int, drain_timeout: float) -> bool:
     return False
 
 
+def _get_ancestor_pids() -> set[int]:
+    """Return the set of PIDs in the current process's ancestor chain.
+
+    Walks from the current PID up to PID 1 (init) so that process-table scans
+    never match the calling CLI process or any of its parents.  This prevents
+    ``hermes gateway status`` from falsely counting the ``hermes`` CLI that
+    invoked it as a running gateway instance (see #13242).
+    """
+    ancestors: set[int] = set()
+    pid = os.getpid()
+    # Cap iterations to avoid infinite loops on exotic platforms.
+    for _ in range(64):
+        ancestors.add(pid)
+        parent = _get_parent_pid(pid)
+        if parent is None or parent <= 0 or parent in ancestors:
+            break
+        pid = parent
+    return ancestors
+
+
 def _append_unique_pid(pids: list[int], pid: int | None, exclude_pids: set[int]) -> None:
     if pid is None or pid <= 0:
         return
@@ -252,6 +272,10 @@ def _scan_gateway_pids(exclude_pids: set[int], all_profiles: bool = False) -> li
     a live gateway when the PID file is stale/missing, and ``--all`` sweeps can
     discover gateways outside the current profile.
     """
+    # Exclude the entire ancestor chain so the CLI process that invoked this
+    # scan (e.g. ``hermes gateway status``) is never mistaken for a running
+    # gateway.  See #13242.
+    exclude_pids = exclude_pids | _get_ancestor_pids()
     pids: list[int] = []
     patterns = [
         "hermes_cli.main gateway",
@@ -688,6 +712,32 @@ def _print_gateway_process_mismatch(snapshot: GatewayRuntimeSnapshot) -> None:
     print(f"  PID(s): {_format_gateway_pids(snapshot.gateway_pids, limit=None)}")
     print("  This is usually a manual foreground/tmux/nohup run, so `hermes gateway`")
     print("  can refuse to start another copy until this process stops.")
+
+
+def _print_other_profiles_gateway_status() -> None:
+    """Print a summary of gateway status across all profiles.
+
+    Shown at the bottom of ``hermes gateway status`` output so users with
+    multiple profiles can tell at a glance which gateways are running and
+    avoid confusing another profile's process with the current one.
+    """
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        current = get_active_profile_name()
+        other_processes = [
+            p for p in find_profile_gateway_processes()
+            if p.profile != current
+        ]
+        if not other_processes:
+            return
+
+        print()
+        print("Other profiles:")
+        for proc in other_processes:
+            print(f"  ✓ {proc.profile:<16s} — PID {proc.pid}")
+    except Exception:
+        pass
 
 
 def kill_gateway_processes(force: bool = False, exclude_pids: set | None = None,
@@ -4455,6 +4505,9 @@ def _gateway_command_inner(args):
                 else:
                     print("  hermes gateway install  # Install as user service")
                     print("  sudo hermes gateway install --system  # Install as boot-time system service")
+
+        # Show other profiles' gateway status for multi-profile awareness
+        _print_other_profiles_gateway_status()
 
     elif subcmd == "migrate-legacy":
         # Stop, disable, and remove legacy Hermes gateway unit files from

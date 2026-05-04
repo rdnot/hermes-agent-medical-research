@@ -10336,7 +10336,10 @@ class AIAgent:
                     provider_preferences["order"] = self.providers_order
                 if self.provider_sort:
                     provider_preferences["sort"] = self.provider_sort
-                if provider_preferences:
+                if provider_preferences and (
+                    (self.provider or "").strip().lower() == "openrouter"
+                    or self._is_openrouter_url()
+                ):
                     summary_extra_body["provider"] = provider_preferences
 
                 if summary_extra_body:
@@ -10669,11 +10672,11 @@ class AIAgent:
                     self.model,
                     f"{self.context_compressor.context_length:,}",
                 )
-                if not self.quiet_mode:
-                    self._safe_print(
-                        f"📦 Preflight compression: ~{_preflight_tokens:,} tokens "
-                        f">= {self.context_compressor.threshold_tokens:,} threshold"
-                    )
+                self._emit_status(
+                    f"📦 Preflight compression: ~{_preflight_tokens:,} tokens "
+                    f">= {self.context_compressor.threshold_tokens:,} threshold. "
+                    "This may take a moment."
+                )
                 # May need multiple passes for very large sessions with small
                 # context windows (each pass summarises the middle N turns).
                 for _pass in range(3):
