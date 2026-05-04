@@ -5852,6 +5852,17 @@ class AIAgent:
             return primary_client
         with self._openai_client_lock():
             request_kwargs = dict(self._client_kwargs)
+        # Per-request OpenAI-wire clients (used by both the non-streaming
+        # chat-completions path and the streaming chat-completions path
+        # in `_interruptible_api_call`) should not run the SDK's built-in
+        # retry loop: the agent's outer loop owns retries with credential
+        # rotation, provider fallback, and backoff that the SDK can't
+        # see. Leaving SDK retries on (default 2) compounds with our outer
+        # retries and lets a single hung provider request stretch to ~3x
+        # the per-call timeout before our stale detector reports it.
+        # Shared/primary clients and Anthropic / Bedrock paths are
+        # unaffected (they don't go through here).
+        request_kwargs["max_retries"] = 0
         if (
             base_url_host_matches(str(request_kwargs.get("base_url", "")), "api.githubcopilot.com")
             and self._api_kwargs_have_image_parts(api_kwargs or {})
@@ -10457,6 +10468,15 @@ class AIAgent:
         from hermes_logging import set_session_context
         set_session_context(self.session_id)
 
+        # Bind the skill write-origin ContextVar for this thread so tool
+        # handlers (e.g. skill_manage create) can tell whether they are
+        # running inside the background self-improvement review fork vs.
+        # a foreground user-directed turn. Set at the top of each call;
+        # the review fork runs on its own thread with a fresh context,
+        # so the foreground value here does not leak into it.
+        from tools.skill_provenance import set_current_write_origin
+        set_current_write_origin(getattr(self, "_memory_write_origin", "assistant_tool"))
+
         # If the previous turn activated fallback, restore the primary
         # runtime so this turn gets a fresh attempt with the preferred model.
         # No-op when _fallback_activated is False (gateway, first turn, etc.).
@@ -13492,9 +13512,22 @@ class AIAgent:
                             m.get("role") == "tool"
                             for m in messages[-5:]  # check recent messages
                         )
+                        # Detect Qwen3/Ollama-style in-content thinking blocks.
+                        # Ollama puts <think> in the content field (not in
+                        # reasoning_content), so _has_structured below would
+                        # miss it.  We check here so thinking-only responses
+                        # after tool calls route to prefill instead of nudge.
+                        _has_inline_thinking = bool(
+                            re.search(
+                                r'<think>|<thinking>|<reasoning>',
+                                final_response or "",
+                                re.IGNORECASE,
+                            )
+                        )
                         if (
                             _prior_was_tool
                             and not getattr(self, "_post_tool_empty_retried", False)
+                            and not _has_inline_thinking  # thinking model still working — let prefill handle
                         ):
                             self._post_tool_empty_retried = True
                             # Clear stale narration so it doesn't resurface
@@ -13534,10 +13567,13 @@ class AIAgent:
                         # continue — the model will see its own reasoning
                         # on the next turn and produce the text portion.
                         # Inspired by clawdbot's "incomplete-text" recovery.
+                        # Also covers Qwen3/Ollama in-content <think> blocks
+                        # (detected above as _has_inline_thinking).
                         _has_structured = bool(
                             getattr(assistant_message, "reasoning", None)
                             or getattr(assistant_message, "reasoning_content", None)
                             or getattr(assistant_message, "reasoning_details", None)
+                            or _has_inline_thinking
                         )
                         if _has_structured and self._thinking_prefill_retries < 2:
                             self._thinking_prefill_retries += 1
