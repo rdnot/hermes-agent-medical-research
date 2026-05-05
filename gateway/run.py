@@ -3906,7 +3906,17 @@ class GatewayRunner:
             return out
 
         def _ready_nonempty() -> bool:
-            """Cheap probe: is there a ready+assigned+unclaimed task on ANY board?"""
+            """Cheap probe: is there at least one ready+assigned+unclaimed
+            task on ANY board whose assignee maps to a real Hermes profile
+            (i.e. one the dispatcher would actually spawn for)?
+
+            Tasks assigned to control-plane lanes (e.g. ``orion-cc``,
+            ``orion-research``) are pulled by terminals via
+            ``claim_task`` directly and never spawnable, so a queue full
+            of those is "correctly idle", not "stuck". Filtering them out
+            here keeps the stuck-warn fire only on real failures (broken
+            PATH, missing venv, credential loss for a real Hermes profile).
+            """
             try:
                 boards = _kb.list_boards(include_archived=False)
             except Exception:
@@ -3916,12 +3926,7 @@ class GatewayRunner:
                 conn = None
                 try:
                     conn = _kb.connect(board=slug)
-                    row = conn.execute(
-                        "SELECT 1 FROM tasks "
-                        "WHERE status = 'ready' AND assignee IS NOT NULL "
-                        "    AND claim_lock IS NULL LIMIT 1"
-                    ).fetchone()
-                    if row is not None:
+                    if _kb.has_spawnable_ready(conn):
                         return True
                 except Exception:
                     continue
@@ -5020,10 +5025,12 @@ class GatewayRunner:
                     response_text = raw
             if response_text:
                 response_path = _hermes_home / ".update_response"
+                prompt_path = _hermes_home / ".update_prompt.json"
                 try:
                     tmp = response_path.with_suffix(".tmp")
                     tmp.write_text(response_text)
                     tmp.replace(response_path)
+                    prompt_path.unlink(missing_ok=True)
                 except OSError as e:
                     logger.warning("Failed to write update response: %s", e)
                     return f"✗ Failed to send response to update process: {e}"
@@ -5038,10 +5045,12 @@ class GatewayRunner:
             # The slash command then falls through to normal dispatch.
             if _recognized_cmd:
                 response_path = _hermes_home / ".update_response"
+                prompt_path = _hermes_home / ".update_prompt.json"
                 try:
                     tmp = response_path.with_suffix(".tmp")
                     tmp.write_text("")
                     tmp.replace(response_path)
+                    prompt_path.unlink(missing_ok=True)
                     logger.info(
                         "Recognized /%s during pending update prompt for %s; "
                         "cancelled prompt with default and dispatching command",
@@ -11488,12 +11497,13 @@ class GatewayRunner:
                                 f"or type your answer directly.",
                                 metadata=metadata,
                             )
+                        # Keep the prompt marker on disk until the user
+                        # answers. If the gateway restarts mid-prompt, the
+                        # next watcher can recover by re-forwarding it from
+                        # disk. Duplicate sends in the same process are
+                        # still suppressed by _update_prompt_pending.
                         self._update_prompt_pending[session_key] = True
-                        # Remove the prompt file so it isn't re-read on the
-                        # next poll cycle.  The update process only needs
                         # .update_response to continue — it doesn't re-check
-                        # .update_prompt.json while waiting.
-                        prompt_path.unlink(missing_ok=True)
                         logger.info("Forwarded update prompt to %s: %s", session_key, prompt_text[:80])
                 except (json.JSONDecodeError, OSError) as e:
                     logger.debug("Failed to read update prompt: %s", e)
@@ -15003,15 +15013,14 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
 
     runner = GatewayRunner(config)
     
-    # Track whether a signal initiated the shutdown (vs. internal request).
-    # When an unexpected SIGTERM kills the gateway, we exit non-zero so
-    # systemd's Restart=on-failure revives the process.  systemctl stop
-    # is safe: systemd tracks stop-requested state independently of exit
-    # code, so Restart= never fires for a deliberate stop.
+    # Track whether an unexpected signal initiated the shutdown. When an
+    # unexpected SIGTERM kills the gateway, we exit non-zero so service
+    # managers can revive the process. Planned stop paths write a marker
+    # before signalling us so they can exit cleanly instead.
     _signal_initiated_shutdown = False
 
     # Set up signal handlers
-    def shutdown_signal_handler():
+    def shutdown_signal_handler(received_signal=None):
         nonlocal _signal_initiated_shutdown
         # Planned --replace takeover check: when a sibling gateway is
         # taking over via --replace, it wrote a marker naming this PID
@@ -15027,9 +15036,27 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         except Exception as e:
             logger.debug("Takeover marker check failed: %s", e)
 
+        # Planned stop check: service managers and `hermes gateway stop`
+        # also send SIGTERM, which is indistinguishable from an unexpected
+        # external kill unless the CLI marks it first. SIGINT comes from an
+        # interactive Ctrl+C and is likewise an intentional foreground stop.
+        planned_stop = False
+        if received_signal == signal.SIGINT:
+            planned_stop = True
+        elif not planned_takeover:
+            try:
+                from gateway.status import consume_planned_stop_marker_for_self
+                planned_stop = consume_planned_stop_marker_for_self()
+            except Exception as e:
+                logger.debug("Planned stop marker check failed: %s", e)
+
         if planned_takeover:
             logger.info(
                 "Received SIGTERM as a planned --replace takeover — exiting cleanly"
+            )
+        elif planned_stop:
+            logger.info(
+                "Received SIGTERM/SIGINT as a planned gateway stop — exiting cleanly"
             )
         else:
             _signal_initiated_shutdown = True
@@ -15066,7 +15093,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     if threading.current_thread() is threading.main_thread():
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
-                loop.add_signal_handler(sig, shutdown_signal_handler)
+                loop.add_signal_handler(sig, shutdown_signal_handler, sig)
             except NotImplementedError:
                 pass
         if hasattr(signal, "SIGUSR1"):
@@ -15164,14 +15191,14 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     if runner.exit_code is not None:
         raise SystemExit(runner.exit_code)
 
-    # When a signal (SIGTERM/SIGINT) caused the shutdown and it wasn't a
-    # planned restart (/restart, /update, SIGUSR1), exit non-zero so
-    # systemd's Restart=on-failure revives the process.  This covers:
+    # When an unexpected SIGTERM caused the shutdown and it wasn't a planned
+    # restart (/restart, /update, SIGUSR1), exit non-zero so systemd's
+    # Restart=on-failure revives the process.  This covers:
     #   - hermes update killing the gateway mid-work
     #   - External kill commands
     #   - WSL2/container runtime sending unexpected signals
-    # systemctl stop is safe: systemd tracks "stop requested" state
-    # independently of exit code, so Restart= never fires for it.
+    # `hermes gateway stop` and interactive Ctrl+C are handled above as
+    # planned stops and should not trigger service-manager revival.
     if _signal_initiated_shutdown and not runner._restart_requested:
         logger.info(
             "Exiting with code 1 (signal-initiated shutdown without restart "
