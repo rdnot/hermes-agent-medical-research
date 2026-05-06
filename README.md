@@ -102,7 +102,7 @@ Language: English
 ```
 
 - **Tell Hermes to** : set web.search_backend to tavily , and set the api key in env (or other web search services. For free local search → set web.search_backend to searxng and set SEARXNG_URL in env, or tell Hermes to install and set up local searxng)
-- **Tell Hermes to** : set web.extract_backend to local (fork: free extraction via curl_cffi/scrapling — do NOT set to searxng, it's search-only)
+- **Tell Hermes to** : set web.extract_backend to local (fork: free extraction via curl_cffi/scrapling)
   [or set in config yourself]
 ```yaml
 web:
