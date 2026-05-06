@@ -149,14 +149,14 @@ def _load_web_config() -> dict:
         return {}
 
 def _get_backend() -> str:
-    """Determine which web backend to use.
+    """Determine which web backend to use (shared fallback).
 
     Reads ``web.backend`` from config.yaml (set by ``hermes tools``).
     Falls back to whichever API key is present for users who configured
     keys manually without running setup.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in ("parallel", "firecrawl", "tavily", "exa"):
+    if configured in ("parallel", "firecrawl", "tavily", "exa", "searxng"):
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
@@ -167,6 +167,7 @@ def _get_backend() -> str:
         ("parallel", _has_env("PARALLEL_API_KEY")),
         ("tavily", _has_env("TAVILY_API_KEY")),
         ("exa", _has_env("EXA_API_KEY")),
+        ("searxng", _has_env("SEARXNG_URL")),
     )
     for backend, available in backend_candidates:
         if available:
@@ -175,17 +176,47 @@ def _get_backend() -> str:
     return "firecrawl"  # default (backward compat)
 
 
-def _get_extract_backend() -> str:
-    """Determine which web EXTRACT backend to use.
+def _get_search_backend() -> str:
+    """Determine which backend to use for web_search specifically.
 
-    Reads ``web.extract_backend`` from config.yaml.
-    Allows separate backend for extract vs search (e.g. tavily for search,
-    local for extract). Falls back to ``web.backend`` if not set.
-    Valid values: "local", "parallel", "firecrawl", "tavily", "exa"
+    Selection priority:
+    1. ``web.search_backend`` (per-capability override)
+    2. ``web.backend`` (shared fallback — existing behavior)
+    3. Auto-detect from env vars
+
+    This enables using different providers for search vs extract
+    (e.g. SearXNG for search + Firecrawl for extract).
     """
-    configured = (_load_web_config().get("extract_backend") or "").lower().strip()
-    if configured in ("local", "parallel", "firecrawl", "tavily", "exa"):
-        return configured
+    return _get_capability_backend("search")
+
+
+def _get_extract_backend() -> str:
+    """Determine which backend to use for web_extract specifically.
+
+    Selection priority:
+    1. ``web.extract_backend`` == "local" → use local tiered fetcher (fork)
+    2. ``web.extract_backend`` set → use _get_capability_backend("extract")
+    3. ``web.backend`` (shared fallback — existing behavior)
+    4. Auto-detect from env vars
+    """
+    cfg = _load_web_config()
+    configured = (cfg.get("extract_backend") or "").lower().strip()
+    # Fork: "local" routes to tiered fetcher (curl_cffi → scrapling → httpx)
+    if configured == "local":
+        return "local"
+    return _get_capability_backend("extract")
+
+
+def _get_capability_backend(capability: str) -> str:
+    """Shared helper for per-capability backend selection.
+
+    Reads ``web.{capability}_backend`` from config; if set and available,
+    uses it. Otherwise falls through to the shared ``_get_backend()``.
+    """
+    cfg = _load_web_config()
+    specific = (cfg.get(f"{capability}_backend") or "").lower().strip()
+    if specific and _is_backend_available(specific):
+        return specific
     return _get_backend()
 
 
@@ -199,6 +230,8 @@ def _is_backend_available(backend: str) -> bool:
         return check_firecrawl_api_key()
     if backend == "tavily":
         return _has_env("TAVILY_API_KEY")
+    if backend == "searxng":
+        return _has_env("SEARXNG_URL")
     return False
 
 # ─── Firecrawl Client ────────────────────────────────────────────────────────
@@ -1634,8 +1667,8 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         if is_interrupted():
             return tool_error("Interrupted", success=False)
 
-        # Dispatch to the configured backend
-        backend = _get_backend()
+        # Dispatch to the configured search backend
+        backend = _get_search_backend()
         if backend == "parallel":
             response_data = _parallel_search(query, limit)
             debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
@@ -1647,6 +1680,16 @@ def web_search_tool(query: str, limit: int = 5) -> str:
 
         if backend == "exa":
             response_data = _exa_search(query, limit)
+            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
+            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
+            debug_call_data["final_response_size"] = len(result_json)
+            _debug.log_call("web_search_tool", debug_call_data)
+            _debug.save()
+            return result_json
+
+        if backend == "searxng":
+            from tools.web_providers.searxng import SearXNGSearchProvider
+            response_data = SearXNGSearchProvider().search(query, limit)
             debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
             result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
             debug_call_data["final_response_size"] = len(result_json)
@@ -1817,6 +1860,13 @@ async def web_extract_tool(
                     "include_images": False,
                 })
                 results = _normalize_tavily_documents(raw, fallback_url=safe_urls[0] if safe_urls else "")
+            elif backend == "searxng":
+                # SearXNG is search-only — it cannot extract URL content
+                return json.dumps({
+                    "success": False,
+                    "error": "SearXNG is a search-only backend and cannot extract URL content. "
+                             "Set web.extract_backend to firecrawl, tavily, exa, or parallel.",
+                }, ensure_ascii=False)
             else:
                 # ── Firecrawl extraction ──
                 # Determine requested formats for Firecrawl v2
@@ -2211,6 +2261,14 @@ async def web_crawl_tool(
             _debug.save()
             return cleaned_result
 
+        # SearXNG is search-only — it cannot crawl
+        if backend == "searxng":
+            return json.dumps({
+                "error": "SearXNG is a search-only backend and cannot crawl URLs. "
+                         "Set FIRECRAWL_API_KEY for crawling, or use web_search instead.",
+                "success": False,
+            }, ensure_ascii=False)
+
         # web_crawl requires Firecrawl or the Firecrawl tool-gateway — Parallel has no crawl API
         if not check_firecrawl_api_key():
             return json.dumps({
@@ -2506,9 +2564,9 @@ def check_firecrawl_api_key() -> bool:
 def check_web_api_key() -> bool:
     """Check whether the configured web backend is available."""
     configured = _load_web_config().get("backend", "").lower().strip()
-    if configured in ("exa", "parallel", "firecrawl", "tavily"):
+    if configured in ("exa", "parallel", "firecrawl", "tavily", "searxng"):
         return _is_backend_available(configured)
-    return any(_is_backend_available(backend) for backend in ("exa", "parallel", "firecrawl", "tavily"))
+    return any(_is_backend_available(backend) for backend in ("exa", "parallel", "firecrawl", "tavily", "searxng"))
 
 
 def check_auxiliary_model() -> bool:
@@ -2543,6 +2601,8 @@ if __name__ == "__main__":
             print("   Using Parallel API (https://parallel.ai)")
         elif backend == "tavily":
             print("   Using Tavily API (https://tavily.com)")
+        elif backend == "searxng":
+            print(f"   Using SearXNG (search only): {os.getenv('SEARXNG_URL', '').strip()}")
         else:
             if firecrawl_url_available:
                 print(f"   Using self-hosted Firecrawl: {os.getenv('FIRECRAWL_API_URL').strip().rstrip('/')}")
