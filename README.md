@@ -6,7 +6,7 @@
 
 **Last fork README.md update:** 2026-05-07
 
-## Nanobot → Hermes Port Status
+## Nanobot Medical Research Fork → Hermes Port Status
 
 | Feature | Nanobot | Status | Note |
 |---------|---------|--------|------|
