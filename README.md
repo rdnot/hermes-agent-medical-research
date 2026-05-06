@@ -122,7 +122,7 @@ web:
 | `firecrawl` | Firecrawl API directly (no local attempt) | Error |
 | `tavily` / `exa` / `parallel` | That API directly | Error |
 | `searxng` | Error (search-only, cannot extract) | — |
-| `""` (empty) | Falls to `web.backend`, then auto-detect | Error |
+| `""` (empty) | Falls to `web.backend`, then auto-detect from env | Error |
 
 - **Tell Hermes to** : install required dependencies (curl_cffi, scrapling, scrapling[fetchers], trafilatura, PyMuPDF(optional)) then install the browser dependencies with `scrapling install`)
 
