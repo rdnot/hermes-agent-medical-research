@@ -54,35 +54,80 @@
 - **CLI/Gateway defaults** aligned to 200 iterations
 - **Tool summary in streaming mode** (printed after stream box closes)
 
-## Setup for Medical Research
+## What You Can Do Now (setting up for medical research)
 
-```bash
-# 1. Clone this fork
-git clone https://github.com/rdnot/hermes-agent-medical-research.git ~/.hermes/hermes-agent
-cd ~/.hermes/hermes-agent
-source venv/bin/activate  # or use the installer
+- **Tell Hermes to** : pull this fork into local Hermes agent ( https://github.com/rdnot/hermes-agent-medical-research/ )
 
-# 2. Configure web backends
-hermes config set web.backend tavily          # or: firecrawl, exa, searxng
-hermes config set web.extract_backend local    # fork: use free local fetcher
+- **Restart Hermes agent** : `/exit` then `hermes chat` (in CLI), `/restart` (in messaging app)
 
-# 3. Install fork dependencies
-pip install curl_cffi scrapling trafilatura PyMuPDF
-scrapling install  # browser deps for JS rendering
-
-# 4. (Optional) Set up SearXNG for free local search
-# Set SEARXNG_URL in ~/.hermes/.env, then:
-hermes config set web.search_backend searxng
+- **Tell Hermes to** : set SOUL.md to
+```
+I am Hermes agent, a helpful AI assistant for ER doctor.
+Personality
+Helpful and in-depth.
+Concise and to the point.
+Do not ask follow up questions.
+Curious and eager to learn, easy to trigger web_search tool if user asks for information.
+Always list relevant URL references at the end of response.
+Values
+Accuracy over speed
+User privacy and safety
+Transparency in actions
 ```
 
-### Config example (`~/.hermes/config.yaml`)
+- **Tell Hermes to** : set USER.md to
+```
+User Profile
+Role: Emergency Room (ER) Doctor
+Communication style: Medical assistant style
+Timezone: ***
+Language: English
+```
 
+- **Tell Hermes to** : set MEMORY.md to
+```
+## Current Long-term Memory
+## User Information
+* User is an ER doctor who uses AI tools for in-depth medical research, improving patient care.
+* User's work context involves processing medical literature, guidelines, and analysing time-critical evidence-based acute care of ER patients.
+
+## Preferences
+* User has a strong preference for verified and latest up-to-date sources.
+* User is knowledgeable about current medical guidelines and will correct inaccuracies when found.
+* **CRITICAL: For medical knowledge summaries, user requires comprehensive, structured format with practical ER clinical points.**
+
+## Important Notes
+* NEVER fabricate or invent search results. If information is not current, say so honestly.
+* Always list relevant URL references at the end of response.
+```
+
+- **Tell Hermes to** : set web.backend to tavily , and set the api key in env (or other web search services, or even tell Hermes to install and set up local searxng for free local websearch)
+- **Tell Hermes to** : set web.extract_backend to local
+  [or set in config yourself]
 ```yaml
 web:
-  backend: tavily              # search backend (or searxng for free)
-  search_backend: searxng       # optional: override search separately
-  extract_backend: local         # fork: free local extraction
+  backend: tavily
+  extract_backend: local
 ```
+
+- **Tell Hermes to** : install required dependencies (curl_cffi, scrapling, scrapling[fetchers], trafilatura, PyMuPDF(optional)) then install the browser dependencies with `scrapling install`)
+
+- **Restart Hermes agent** : `/exit` then `hermes chat` (in CLI), `/restart` (in messaging app)
+
+- **Tell Hermes to** : do 1 web search then 1 local web extraction about pubmed pneumonia article then summarize
+
+### ✅ Ready for Testing
+
+Your comprehensive research use case should work:
+
+"Comprehensive research about pneumonia in ER , fetch at least 10 up-to-date, evidence-based and reliable sources or guidelines, make it into .md file in ~/workspace folder, write 2000 words first then edit for more contents."
+
+**Expected Output:**
+- ✅ ~7000 words
+- ✅ ~50KB size
+- ✅ ~28 tool calls
+- ✅ Structured markdown
+- ✅ Tool summary displayed
 
 ---
 
