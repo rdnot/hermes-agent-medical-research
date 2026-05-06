@@ -101,13 +101,14 @@ Language: English
 * Always list relevant URL references at the end of response.
 ```
 
-- **Tell Hermes to** : set web.backend to tavily , and set the api key in env (or other web search services, or even tell Hermes to install and set up local searxng for free local websearch)
-- **Tell Hermes to** : set web.extract_backend to local
+- **Tell Hermes to** : set web.search_backend to tavily , and set the api key in env (or other web search services. For free local search → set web.search_backend to searxng and set SEARXNG_URL in env, or tell Hermes to install and set up local searxng)
+- **Tell Hermes to** : set web.extract_backend to local (fork: free extraction via curl_cffi/scrapling — do NOT set to searxng, it's search-only)
   [or set in config yourself]
 ```yaml
 web:
-  backend: tavily
-  extract_backend: local
+  backend: tavily              # shared fallback for both search and extract
+  search_backend: searxng      # (optional) override search to use free local searxng
+  extract_backend: local        # fork: free local extraction (curl_cffi → scrapling → httpx)
 ```
 
 - **Tell Hermes to** : install required dependencies (curl_cffi, scrapling, scrapling[fetchers], trafilatura, PyMuPDF(optional)) then install the browser dependencies with `scrapling install`)
