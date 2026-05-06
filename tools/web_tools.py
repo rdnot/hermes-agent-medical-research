@@ -190,6 +190,49 @@ def _get_search_backend() -> str:
     return _get_capability_backend("search")
 
 
+async def _extract_with_backend(url: str, backend: str, format: str = None) -> Dict[str, Any]:
+    """Extract a single URL using the specified backend (for fallback routing)."""
+    try:
+        if backend == "tavily":
+            raw = _tavily_request("extract", {"urls": [url], "include_images": False})
+            docs = _normalize_tavily_documents(raw, fallback_url=url)
+            return docs[0] if docs else {"url": url, "title": "", "content": "", "error": "Tavily returned no results"}
+        elif backend == "parallel":
+            docs = await _parallel_extract([url])
+            return docs[0] if docs else {"url": url, "title": "", "content": "", "error": "Parallel returned no results"}
+        elif backend == "exa":
+            docs = _exa_extract([url])
+            return docs[0] if docs else {"url": url, "title": "", "content": "", "error": "Exa returned no results"}
+        elif backend in ("firecrawl", ""):
+            # Firecrawl default path — run in thread with timeout
+            formats = []
+            if format == "markdown":
+                formats = ["markdown"]
+            elif format == "html":
+                formats = ["html"]
+            else:
+                formats = ["markdown", "html"]
+            try:
+                scrape_result = await asyncio.wait_for(
+                    asyncio.to_thread(_get_firecrawl_client().scrape, url=url, formats=formats),
+                    timeout=60,
+                )
+                scrape_payload = _extract_scrape_payload(scrape_result)
+                metadata = scrape_payload.get("metadata", {})
+                if not isinstance(metadata, dict):
+                    metadata = metadata.model_dump() if hasattr(metadata, "model_dump") else (metadata.__dict__ if hasattr(metadata, "__dict__") else {})
+                title = metadata.get("title", "")
+                final_url = metadata.get("sourceURL", url)
+                chosen = scrape_payload.get("markdown") or scrape_payload.get("html") or ""
+                return {"url": final_url, "title": title, "content": chosen, "raw_content": chosen, "metadata": metadata}
+            except Exception as e:
+                return {"url": url, "title": "", "content": "", "error": f"Firecrawl failed: {e}"}
+        else:
+            return {"url": url, "title": "", "content": "", "error": f"Unknown fallback backend: {backend}"}
+    except Exception as e:
+        return {"url": url, "title": "", "content": "", "error": f"Fallback extract error ({backend}): {e}"}
+
+
 def _get_extract_backend() -> str:
     """Determine which backend to use for web_extract specifically.
 
@@ -1837,18 +1880,28 @@ async def web_extract_tool(
             backend = _get_extract_backend()
 
             if backend == "local":
-                # ── Local-only extraction (curl_cffi + trafilatura) ─────────
-                # No cloud API needed. Falls back to httpx if curl_cffi fails.
+                # ── Local-only extraction (curl_cffi → scrapling → httpx) ──
+                # Tries tiered local fetchers first. Falls back to web.backend
+                # (shared fallback) if ALL local fetchers fail (rare).
+                shared_backend = (_load_web_config().get("backend") or "").strip().lower()
                 results = []
                 for url in safe_urls:
                     try:
                         local_result = await _fetch_and_process_locally(url, timeout=60)
                         if local_result is not None:
                             results.append(local_result)
-                        else:
-                            results.append({"url": url, "title": "", "content": "", "error": "Local fetch failed — all local fetchers exhausted"})
+                            continue
                     except Exception as e:
-                        results.append({"url": url, "title": "", "content": "", "error": f"Local fetch error: {e}"})
+                        logger.debug("Local fetch error for %s: %s", url, e)
+
+                    # Local failed — fall back to shared web.backend (if configured)
+                    if shared_backend:
+                        logger.info("Local fetch failed for %s — falling back to %s", url, shared_backend)
+                        fallback_result = await _extract_with_backend(url, shared_backend, format=format)
+                        results.append(fallback_result)
+                    else:
+                        logger.warning("Local fetch failed for %s and no shared backend configured", url)
+                        results.append({"url": url, "title": "", "content": "", "error": "Local fetch failed — all local fetchers exhausted (no fallback backend configured)"})
             elif backend == "parallel":
                 results = await _parallel_extract(safe_urls)
             elif backend == "exa":
@@ -1901,28 +1954,8 @@ async def web_extract_tool(
                         continue
 
                     try:
-                        # ── Try Local Fetch First (Free Fallback) ──────────────
-                        # Attempt tiered local fetchers before using paid Firecrawl API.
-                        # Local fetch returns None if it should fall back to cloud API.
-                        logger.info("Fetching: %s", url)
-                        local_result = await _fetch_and_process_locally(url, timeout=60)
-                        
-                        if local_result is not None:
-                            # Local fetch succeeded — use result
-                            logger.info("Local fetch succeeded for %s", url)
-                            if "error" in local_result:
-                                # Local fetch had an error (e.g., PDF extraction failed)
-                                results.append(local_result)
-                                continue
-                            results.append(local_result)
-                            continue
-                        
-                        # Local fetch returned None — fall back to Firecrawl API
-                        logger.debug("Local fetch returned None, falling back to Firecrawl API for %s", url)
-                        
-                        # ── Firecrawl extraction (Cloud API Fallback) ───────────
-                        # Run synchronous Firecrawl scrape in a thread with a
-                        # 60s timeout so a hung fetch doesn't block the session.
+                        # ── Firecrawl extraction (direct, no local first) ─────
+                        logger.info("Firecrawl scrape: %s", url)
                         try:
                             scrape_result = await asyncio.wait_for(
                                 asyncio.to_thread(

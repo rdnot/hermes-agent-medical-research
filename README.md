@@ -33,7 +33,7 @@
 ### Web Tools (`tools/web_tools.py`)
 - **Tiered Local Fetcher**: curl_cffi (Chrome TLS) → Scrapling (JS/Cloudflare) → httpx fallback
 - **`web.extract_backend: local`**: Bypass cloud APIs entirely for extraction
-- **Per-capability backend split**: Upstream added `web.search_backend` / `web.extract_backend` separation; fork preserves `local` as valid extract backend
+- **Per-capability backend split**: Upstream added `web.search_backend` / `web.extract_backend` separation; fork adds `local` as extract backend with smart fallback
 - **SearXNG**: Upstream native support for `web.search_backend: searxng` (set `SEARXNG_URL` in env)
 - **PDF & HTML**: PyMuPDF for PDFs, trafilatura for HTML-to-text
 - **Reddit**: `.json` auto-conversion, structured parsing
@@ -101,15 +101,28 @@ Language: English
 * Always list relevant URL references at the end of response.
 ```
 
-- **Tell Hermes to** : set web.search_backend to tavily , and set the api key in env (or other web search services. For free local search → set web.search_backend to searxng and set SEARXNG_URL in env, or tell Hermes to install and set up local searxng)
-- **Tell Hermes to** : set web.extract_backend to local (fork: free extraction via curl_cffi/scrapling)
+- **Tell Hermes to** : set web.search_backend to tavily (or searxng), and set the api key in env. For free local search → set web.search_backend to searxng and set SEARXNG_URL in env, or tell Hermes to install and set up local searxng)
+- **Tell Hermes to** : set web.extract_backend to local (fork: free extraction via curl_cffi → scrapling → httpx, with fallback to web.backend on rare total failure)
   [or set in config yourself]
 ```yaml
 web:
   backend: tavily              # shared fallback for both search and extract
-  search_backend: searxng      # (optional) override search to use free local searxng
-  extract_backend: local        # fork: free local extraction (curl_cffi → scrapling → httpx)
+  search_backend: tavily       # specify search provider (tavily | searxng | exa | parallel | firecrawl)
+  # search_backend: searxng    # (optional) override search to use free self-hosted searxng (needs SEARXNG_URL in .env)
+  extract_backend: local       # fork: free local extraction (curl_cffi → scrapling → httpx → fallback to web.backend)
+  # extract_backend: firecrawl # use Firecrawl directly (no local attempt)
+  # extract_backend: tavily    # use Tavily directly
 ```
+
+**Backend resolution logic:**
+
+| Config `extract_backend` | Behavior | On failure |
+|---|---|---|
+| `local` | curl_cffi → scrapling → httpx | Falls back to `web.backend` (if non-empty), else error |
+| `firecrawl` | Firecrawl API directly (no local attempt) | Error |
+| `tavily` / `exa` / `parallel` | That API directly | Error |
+| `searxng` | Error (search-only, cannot extract) | — |
+| `""` (empty) | Falls to `web.backend`, then auto-detect | Error |
 
 - **Tell Hermes to** : install required dependencies (curl_cffi, scrapling, scrapling[fetchers], trafilatura, PyMuPDF(optional)) then install the browser dependencies with `scrapling install`)
 
