@@ -675,6 +675,11 @@ class LineAdapter(BasePlatformAdapter):
             os.getenv("LINE_ALLOWED_ROOMS", "")
         ) | set(extra.get("allowed_rooms", []))
 
+        # Reply only when @-mentioned (groups only, DMs always respond)
+        self.reply_only_mention = _truthy_env(
+            "LINE_REPLY_ONLY_MENTION", bool(extra.get("reply_only_mention", False))
+        )
+
         # Slow-LLM postback button threshold
         try:
             self.slow_response_threshold = float(
@@ -959,7 +964,19 @@ class LineAdapter(BasePlatformAdapter):
         if chat_type == "dm" and self._client:
             asyncio.create_task(self._client.loading(chat_id))
 
-        source_obj = self.create_source(
+        # Mention-only mode: in groups, skip if bot not @-mentioned.
+        if self.reply_only_mention and chat_type in ("group", "room"):
+            mention = msg.get("mention") or {}
+            mentionees = mention.get("mentionees") or []
+            bot_mentioned = any(
+                m.get("userId") == self._bot_user_id
+                for m in mentionees
+            )
+            if not bot_mentioned:
+                logger.debug("LINE: ignoring non-mention message in %s", chat_type)
+                return
+
+        source_obj = self.build_source(
             chat_id=chat_id,
             chat_type=chat_type,
             user_id=user_id,
