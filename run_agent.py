@@ -10125,25 +10125,6 @@ class AIAgent:
                     parent_session_id=old_session_id,
                 )
                 self._session_db_created = True
-                # Forward any standing /goal state from the parent session to
-                # the continuation session so the goal loop survives
-                # auto-compression. Without this rebind, _get_goal_manager()
-                # constructs a fresh manager keyed on the new session_id,
-                # load_goal() returns None, mgr.is_active() is False, and
-                # the loop silently dies mid-task. The goal is stored in
-                # state_meta under "goal:<sid>" by hermes_cli.goals.
-                try:
-                    _goal_meta_key_old = f"goal:{old_session_id}"
-                    _goal_meta_key_new = f"goal:{self.session_id}"
-                    _goal_blob = self._session_db.get_meta(_goal_meta_key_old)
-                    if _goal_blob:
-                        self._session_db.set_meta(_goal_meta_key_new, _goal_blob)
-                        logger.info(
-                            "goal: forwarded standing goal from %s → %s on compression",
-                            old_session_id, self.session_id,
-                        )
-                except Exception as exc:
-                    logger.debug("goal forward on compression failed: %s", exc)
                 # Auto-number the title for the continuation session
                 if old_title:
                     try:
@@ -13182,6 +13163,21 @@ class AIAgent:
                         "does not support multimodal",
                         "does not support vision",
                         "model does not support image",
+                        # ChatGPT-account Codex backend
+                        # (https://chatgpt.com/backend-api/codex) rejects
+                        # data:image/...base64 URLs in input_image fields
+                        # with HTTP 400 "Invalid 'input[N].content[K].image_url'.
+                        # Expected a valid URL, but got a value with an
+                        # invalid format." The OpenAI Responses API on the
+                        # public endpoint accepts data URLs, but the
+                        # ChatGPT-account variant does not. Without this
+                        # phrase the agent cascaded into compression /
+                        # context-too-large recovery instead of just
+                        # stripping the images. Match is narrow on
+                        # purpose — keyed on the field-path apostrophe so
+                        # we don't false-trip on other URL validation
+                        # errors. (issue #23570)
+                        "image_url'. expected",
                     )
                     _err_lower = _err_body.lower()
                     _looks_like_image_rejection = any(
@@ -15069,7 +15065,41 @@ class AIAgent:
                     "— requesting summary..."
                 )
             final_response = self._handle_max_iterations(messages, api_call_count)
-        
+
+            # If running as a kanban worker, block the task so the dispatcher
+            # knows the worker could not complete (rather than treating it as a
+            # protocol violation).  The agent loop strips tools before calling
+            # _handle_max_iterations, so the model cannot call kanban_block
+            # itself — we must do it on its behalf.
+            _kanban_task = os.environ.get("HERMES_KANBAN_TASK")
+            if _kanban_task:
+                try:
+                    handle_function_call(
+                        "kanban_block",
+                        {
+                            "task_id": _kanban_task,
+                            "reason": (
+                                f"Iteration budget exhausted "
+                                f"({api_call_count}/{self.max_iterations}) — "
+                                "task could not complete within the allowed "
+                                "iterations"
+                            ),
+                        },
+                        task_id=effective_task_id,
+                    )
+                    logger.info(
+                        "kanban_block called for task %s after iteration "
+                        "exhaustion (%d/%d)",
+                        _kanban_task, api_call_count, self.max_iterations,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to call kanban_block after iteration "
+                        "exhaustion for task %s",
+                        _kanban_task,
+                        exc_info=True,
+                    )
+
         # Determine if conversation completed successfully
         completed = final_response is not None and api_call_count < self.max_iterations
 
