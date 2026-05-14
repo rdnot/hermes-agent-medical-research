@@ -1412,10 +1412,18 @@ async def web_extract_tool(
             backend = _get_extract_backend()
 
             # Fork: "local" backend uses tiered local fetcher (curl_cffi → scrapling → httpx)
+            # with auto-fallback to web.backend cloud provider on failure.
             if backend == "local":
+                from agent.web_search_registry import (
+                    get_active_extract_provider,
+                    get_provider as _wsp_get_provider,
+                )
+                from tools.interrupt import is_interrupted as _is_interrupted
+
+                # Phase 1: local fetch
                 results = []
+                failed_urls = []
                 for u in safe_urls:
-                    from tools.interrupt import is_interrupted as _is_interrupted
                     if _is_interrupted():
                         results.append({"url": u, "error": "Interrupted", "title": ""})
                         continue
@@ -1423,10 +1431,44 @@ async def web_extract_tool(
                     if local_result is not None:
                         results.append(local_result)
                     else:
-                        results.append({
-                            "url": u, "title": "", "content": "",
-                            "error": "Local fetch failed — all local fetchers exhausted. Set web.extract_backend to firecrawl, tavily, exa, or parallel for cloud fallback.",
-                        })
+                        failed_urls.append(u)
+
+                # Phase 2: fallback to web.backend for failed URLs
+                if failed_urls:
+                    # Resolve cloud fallback: try web.backend first, then extract_backend,
+                    # then active extract provider walk
+                    cfg = _load_web_config()
+                    fallback_backend = (cfg.get("backend") or "").lower().strip()
+                    # If web.backend is search-only, try extract_backend explicitly
+                    if fallback_backend in {"searxng", "brave-free", "ddgs"}:
+                        fallback_backend = (cfg.get("extract_backend") or "").lower().strip()
+                        if fallback_backend in {"searxng", "brave-free", "ddgs", "local", ""}:
+                            fallback_backend = None
+                    if fallback_backend and _is_backend_available(fallback_backend):
+                        fb_provider = _wsp_get_provider(fallback_backend)
+                    else:
+                        fb_provider = get_active_extract_provider()
+
+                    if fb_provider is not None and fb_provider.supports_extract():
+                        logger.info(
+                            "Local extract failed for %d URL(s), falling back to %s",
+                            len(failed_urls), fb_provider.name,
+                        )
+                        import inspect
+                        if inspect.iscoroutinefunction(fb_provider.extract):
+                            fallback_results = await fb_provider.extract(failed_urls, format=format)
+                        else:
+                            fallback_results = await asyncio.to_thread(
+                                fb_provider.extract, failed_urls, format=format
+                            )
+                        results.extend(fallback_results)
+                    else:
+                        # No extract-capable fallback available
+                        for u in failed_urls:
+                            results.append({
+                                "url": u, "title": "", "content": "",
+                                "error": "Local fetch failed — all local fetchers exhausted and no extract-capable cloud backend available. Set web.backend or web.extract_backend to firecrawl, tavily, exa, or parallel.",
+                            })
             # Cloud providers: dispatch through the web search registry.
             # All seven providers (brave-free, ddgs, searxng, exa, parallel,
             # tavily, firecrawl) now live as plugins. The dispatcher is a
