@@ -101,13 +101,13 @@ Language: English
 * Always list relevant URL references at the end of response.
 ```
 
-- **Tell Hermes to** : set web.search_backend to tavily (or searxng), and set the api key in env. For free local search → set web.search_backend to searxng and set SEARXNG_URL in env, or tell Hermes to install and set up local searxng)
+- **Tell Hermes to** : set web.search_backend to tavily (or brave-free or searxng), and set the api key in env. For free local search → set web.search_backend to searxng and set SEARXNG_URL in env, or tell Hermes to install and set up local searxng)
 - **Tell Hermes to** : set web.extract_backend to local (fork: free extraction via curl_cffi → scrapling → httpx, with fallback to web.backend on rare total failure)
   [or set in config yourself]
 ```yaml
 web:
   backend: tavily              # shared fallback for both search and extract
-  search_backend: tavily       # specify search provider (tavily | searxng | exa | parallel | firecrawl)
+  search_backend: tavily       # specify search provider (tavily | brave-free | searxng | exa | parallel | firecrawl)
   # search_backend: searxng    # (optional) override search to use free self-hosted searxng (needs SEARXNG_URL in .env)
   extract_backend: local       # fork: free local extraction (curl_cffi → scrapling → httpx → fallback to web.backend)
   # extract_backend: firecrawl # use Firecrawl directly (no local attempt)
