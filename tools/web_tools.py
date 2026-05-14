@@ -206,17 +206,6 @@ def _get_search_backend() -> str:
     return _get_capability_backend("search")
 
 
-def _get_extract_backend() -> str:
-    """Determine which backend to use for web_extract specifically.
-
-    Selection priority:
-    1. ``web.extract_backend`` (per-capability override)
-    2. ``web.backend`` (shared fallback — existing behavior)
-    3. Auto-detect from env vars
-    """
-    return _get_capability_backend("extract")
-
-
 def _get_capability_backend(capability: str) -> str:
     """Shared helper for per-capability backend selection.
 
