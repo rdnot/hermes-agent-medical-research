@@ -28,18 +28,19 @@
 | **ReadFileTool limits** | ✅ | ❌ Config | `file_read_max_chars` |
 | **_CHAT_RETRY_DELAYS** | ✅ 5 attempts | ❌ SKIP | Hermes: 3 retries, jittered |
 
-## Fork Changes (19 customizations)
+## Fork Changes (22 customizations)
 
 ### Web Tools (`tools/web_tools.py`)
 - **Tiered Local Fetcher**: curl_cffi (Chrome TLS) → Scrapling (JS/Cloudflare) → httpx fallback
 - **`web.extract_backend: local`**: Bypass cloud APIs entirely for extraction
-- **Per-capability backend split**: Upstream added `web.search_backend` / `web.extract_backend` separation; fork adds `local` as extract backend with smart fallback
+- **Per-capability backend split**: Fork adds `local` as extract backend with smart fallback
 - **SearXNG**: Upstream native support for `web.search_backend: searxng` (set `SEARXNG_URL` in env)
 - **PDF & HTML**: PyMuPDF for PDFs, trafilatura for HTML-to-text
-- **Reddit**: `.json` auto-conversion, structured parsing
+- **Reddit**: `.json` auto-conversion, structured comment/thread parsing
 - **LLM summarization disabled** for 5K–500K range (returns raw text)
 - **MAX_OUTPUT_SIZE = 10,000** (upstream: 5,000)
 - **`web_extract` max_result_size_chars = 500,000** (upstream: 100,000)
+- **Auto-fallback**: Local extract fails → falls back to `web.backend`, skips search-only backends
 
 ### Agent (`run_agent.py`)
 - **max_iterations = 200** (upstream: 90)
@@ -53,6 +54,11 @@
 ### CLI & Gateway
 - **CLI/Gateway defaults** aligned to 200 iterations
 - **Tool summary in streaming mode** (printed after stream box closes)
+
+### LINE Messenger (`gateway/config.py`, `plugins/platforms/line/adapter.py`)
+- **`Platform.LINE` static enum member** (upstream LINE is dynamic plugin only)
+- **`reply_only_mention` flag** via `LINE_REPLY_ONLY_MENTION` env var (groups skip non-mentions)
+- **Mention check** in `_handle_message_event` (bot userId match in group/room)
 
 ## What You Can Do Now (setting up for medical research)
 
