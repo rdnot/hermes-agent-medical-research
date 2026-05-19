@@ -1174,10 +1174,20 @@ def test_respawn_guard_old_pr_comment_not_guarded(kanban_home):
     assert reason is None
 
 
-def test_dispatch_respawn_guard_auto_blocks_auth_error(
+def test_dispatch_respawn_guard_defers_auth_error_without_auto_block(
     kanban_home, all_assignees_spawnable
 ):
-    """dispatch_once auto-blocks a ready task whose last error is a blocker_auth."""
+    """dispatch_once defers (does NOT auto-block) a ready task whose last
+    error is a blocker_auth.
+
+    The old behaviour auto-blocked on first occurrence, which was too
+    aggressive: a transient 429 rate-limit (which typically clears in
+    seconds to minutes) would end up requiring manual unblock. The new
+    behaviour defers the spawn this tick; the task stays in ``ready``
+    and gets another chance next tick. If the auth error genuinely
+    persists, the existing ``consecutive_failures`` circuit breaker
+    will auto-block via the normal failure-limit path.
+    """
     spawned_ids = []
 
     def fake_spawn(task, workspace):
@@ -1191,10 +1201,22 @@ def test_dispatch_respawn_guard_auto_blocks_auth_error(
         )
         res = kb.dispatch_once(conn, spawn_fn=fake_spawn)
 
-    assert t in res.auto_blocked
+    # Critical: task is NOT auto-blocked on first occurrence.
+    assert t not in res.auto_blocked, (
+        f"blocker_auth should defer, not auto-block on first occurrence; "
+        f"got auto_blocked={res.auto_blocked!r}"
+    )
+    # It IS recorded as respawn_guarded with the reason.
+    assert (t, "blocker_auth") in res.respawn_guarded, (
+        f"expected (task_id, 'blocker_auth') in respawn_guarded; "
+        f"got {res.respawn_guarded!r}"
+    )
+    # And it's NOT spawned this tick.
     assert t not in spawned_ids
+    # Status stays ``ready`` so a future tick (or operator action) can
+    # retry without manual unblock.
     with kb.connect() as conn:
-        assert kb.get_task(conn, t).status == "blocked"
+        assert kb.get_task(conn, t).status == "ready"
 
 
 def test_dispatch_respawn_guard_skips_recent_success(
@@ -2793,3 +2815,65 @@ def test_detect_stale_skips_blocked_tasks(kanban_home, monkeypatch):
         )
         assert stale == [], "Blocked task should not be reclaimed by stale detection"
         assert kb.get_task(conn, t).status == "blocked"
+
+
+def test_detect_stale_does_not_tick_failure_counter(kanban_home, monkeypatch):
+    """Stale reclaim must NOT tick consecutive_failures.
+
+    Stale detection is dispatcher-side absence-of-heartbeat detection,
+    not a worker failure. Counting it as a failure would let two
+    legitimately-long-running tasks (>4h without explicit heartbeat) trip
+    the circuit breaker and auto-block at the default failure_limit=2,
+    even though no worker actually failed. The 'stale' event in
+    task_events is the right audit surface; the consecutive_failures
+    counter is reserved for spawn_failed / timed_out / crashed.
+    """
+    import hermes_cli.kanban_db as _kb
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="stale-no-counter-tick", assignee="worker")
+        kb.claim_task(conn, t)
+        kb._set_worker_pid(conn, t, os.getpid())
+
+        five_hours_ago = int(time.time()) - (5 * 3600)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET started_at = ? WHERE id = ?", (five_hours_ago, t)
+            )
+            conn.execute(
+                "UPDATE task_runs SET started_at = ? "
+                "WHERE id = (SELECT current_run_id FROM tasks WHERE id = ?)",
+                (five_hours_ago, t),
+            )
+            # Counter starts at 0; assert that's our baseline.
+            row = conn.execute(
+                "SELECT consecutive_failures FROM tasks WHERE id = ?", (t,)
+            ).fetchone()
+            assert row["consecutive_failures"] in (0, None)
+
+        monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+        stale = kb.detect_stale_running(
+            conn, stale_timeout_seconds=14400, signal_fn=lambda p, s: None,
+        )
+        assert t in stale, "Task should be reclaimed by stale detection"
+
+        # Critical assertion: the failure counter MUST NOT have ticked.
+        # Stale reclaim resets to ready for re-dispatch without penalty.
+        row = conn.execute(
+            "SELECT consecutive_failures FROM tasks WHERE id = ?", (t,)
+        ).fetchone()
+        assert row["consecutive_failures"] in (0, None), (
+            f"Stale reclaim ticked consecutive_failures to "
+            f"{row['consecutive_failures']!r}; should remain 0/NULL."
+        )
+
+        # And the audit trail still records the stale event so operators
+        # can see what happened.
+        events = conn.execute(
+            "SELECT kind FROM task_events WHERE task_id = ? ORDER BY id",
+            (t,),
+        ).fetchall()
+        kinds = [e["kind"] for e in events]
+        assert "stale" in kinds, (
+            f"Expected 'stale' event in task_events; got {kinds!r}"
+        )
