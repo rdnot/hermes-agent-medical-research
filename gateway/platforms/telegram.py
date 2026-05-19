@@ -506,7 +506,11 @@ class TelegramAdapter(BasePlatformAdapter):
 
         allowed_csv = os.getenv("TELEGRAM_ALLOWED_USERS", "").strip()
         if not allowed_csv:
-            return True
+            # Fail-closed: no allowlist means deny by default.
+            # The runner auth path in _is_user_authorized() handles
+            # GATEWAY_ALLOW_ALL_USERS; this fallback must not silently
+            # allow everyone (fixes #24457).
+            return os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
         allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
         return "*" in allowed_ids or normalized_user_id in allowed_ids
 
@@ -536,10 +540,13 @@ class TelegramAdapter(BasePlatformAdapter):
         cls,
         reply_to: Optional[str],
         metadata: Optional[Dict[str, Any]] = None,
+        reply_to_mode: Optional[str] = None,
     ) -> Optional[int]:
         if reply_to:
             return int(reply_to)
         if metadata and metadata.get("telegram_dm_topic_reply_fallback"):
+            if reply_to_mode == "off":
+                return None
             return cls._metadata_reply_to_message_id(metadata)
         return None
 
@@ -550,20 +557,34 @@ class TelegramAdapter(BasePlatformAdapter):
         thread_id: Optional[str],
         metadata: Optional[Dict[str, Any]] = None,
         reply_to_message_id: Optional[int] = None,
+        reply_to_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Return Telegram send kwargs for forum and direct-message topic routing.
 
         Supergroup/forum topics use ``message_thread_id``. True Bot API Direct
         Messages topics can opt in with explicit ``direct_messages_topic_id``
         metadata. Hermes-created private-chat topic lanes are marked with
-        ``telegram_dm_topic_reply_fallback`` and must send the private topic
-        thread id together with a reply anchor. Live testing showed that either
-        parameter alone can render outside the visible lane.
+        ``telegram_dm_topic_reply_fallback``. Live replies send the private
+        topic thread id together with a reply anchor; synthetic/resumed sends
+        without an anchor use ``direct_messages_topic_id`` when metadata has it.
+        ``message_thread_id`` alone can render outside the visible lane.
+
+        When ``reply_to_mode`` is ``"off"``, the reply anchor is suppressed for
+        DM topic fallback sends while preserving the ``message_thread_id`` so
+        the message still lands in the correct topic.
         """
         if metadata and metadata.get("telegram_dm_topic_reply_fallback"):
+            if reply_to_mode == "off":
+                return {"message_thread_id": cls._message_thread_id_for_send(thread_id)}
             if reply_to_message_id is None:
                 reply_to_message_id = cls._metadata_reply_to_message_id(metadata)
             if reply_to_message_id is None:
+                direct_topic_id = cls._metadata_direct_messages_topic_id(metadata)
+                if direct_topic_id is not None:
+                    return {
+                        "message_thread_id": None,
+                        "direct_messages_topic_id": int(direct_topic_id),
+                    }
                 return {}
             return {"message_thread_id": cls._message_thread_id_for_send(thread_id)}
         direct_topic_id = cls._metadata_direct_messages_topic_id(metadata)
@@ -685,6 +706,34 @@ class TelegramAdapter(BasePlatformAdapter):
         except ImportError:
             pass
         return isinstance(error, OSError)
+
+    @staticmethod
+    def _looks_like_connect_timeout(error: Exception) -> bool:
+        """Return True when a Telegram TimedOut wraps a connect-timeout.
+
+        A plain Telegram TimedOut may mean the request reached Telegram and
+        should not be re-sent. A ConnectTimeout means the TCP connection was
+        never established, so retrying is safe and prevents silent drops.
+        """
+        seen: set[int] = set()
+        stack: list[BaseException] = [error]
+        while stack:
+            cur = stack.pop()
+            ident = id(cur)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            name = cur.__class__.__name__.lower()
+            text = str(cur).lower()
+            if "connecttimeout" in name or "connect timeout" in text or "connect timed out" in text:
+                return True
+            cause = getattr(cur, "__cause__", None)
+            context = getattr(cur, "__context__", None)
+            if cause is not None:
+                stack.append(cause)
+            if context is not None:
+                stack.append(context)
+        return False
 
     def _coerce_bool_extra(self, key: str, default: bool = False) -> bool:
         value = self.config.extra.get(key) if getattr(self.config, "extra", None) else None
@@ -876,60 +925,107 @@ class TelegramAdapter(BasePlatformAdapter):
     async def _handle_polling_conflict(self, error: Exception) -> None:
         if self.has_fatal_error and self.fatal_error_code == "telegram_polling_conflict":
             return
-        # Track consecutive conflicts — transient 409s can occur when a
-        # previous gateway instance hasn't fully released its long-poll
-        # session on Telegram's server (e.g. during --replace handoffs or
-        # systemd Restart=on-failure respawns).  Retry a few times before
-        # giving up, so the old session has time to expire.
+        # Transient 409 Conflict errors arise when the previous gateway process
+        # has been killed (e.g. during `hermes update` or `--replace` handoffs)
+        # but its long-poll connection hasn't yet expired on Telegram's servers.
+        # Telegram holds open getUpdates sessions for up to ~30s after the
+        # client disconnects, so a new gateway starting immediately will receive
+        # a 409 until that server-side session expires.
+        #
+        # Strategy: stop the local updater, wait long enough for Telegram's
+        # server-side session to expire (RETRY_DELAY grows with each attempt),
+        # drain the connection pool, then restart polling.  We attempt this
+        # MAX_CONFLICT_RETRIES times before declaring a fatal error.
+        #
+        # Crucially, a failed retry must NOT leave polling in an ambiguous
+        # state.  If start_polling() raises, the updater is neither running
+        # nor fatal — messages are silently dropped.  We schedule another
+        # retry attempt instead of returning silently, and only escalate to
+        # fatal after all retries are exhausted.
         self._polling_conflict_count += 1
 
-        MAX_CONFLICT_RETRIES = 3
-        RETRY_DELAY = 10  # seconds
+        MAX_CONFLICT_RETRIES = 5
+        # Delay grows with each attempt: 15s, 25s, 35s, 45s, 55s.
+        # Telegram server-side getUpdates sessions typically expire within
+        # 30s; the increasing back-off ensures we clear that window without
+        # hammering the API on fast-restart loops.
+        RETRY_DELAY = 10 + (self._polling_conflict_count * 10)  # seconds
 
         if self._polling_conflict_count <= MAX_CONFLICT_RETRIES:
             logger.warning(
-                "[%s] Telegram polling conflict (%d/%d), will retry in %ds. Error: %s",
+                "[%s] Telegram polling conflict (%d/%d) — previous session still "
+                "held open on Telegram's servers. Waiting %ds for it to expire. "
+                "Error: %s",
                 self.name, self._polling_conflict_count, MAX_CONFLICT_RETRIES,
                 RETRY_DELAY, error,
             )
+            # Stop the local updater cleanly before sleeping.  If it's already
+            # stopped (e.g. PTB raised before updater.running was set) this is
+            # a no-op.
             try:
                 if self._app and self._app.updater and self._app.updater.running:
                     await self._app.updater.stop()
             except Exception:
                 pass
+
             await asyncio.sleep(RETRY_DELAY)
             await self._drain_polling_connections()
+
             try:
                 await self._app.updater.start_polling(
                     allowed_updates=Update.ALL_TYPES,
                     drop_pending_updates=False,
                     error_callback=self._polling_error_callback_ref,
                 )
-                logger.info("[%s] Telegram polling resumed after conflict retry %d", self.name, self._polling_conflict_count)
-                self._polling_conflict_count = 0  # reset on success
+                logger.info(
+                    "[%s] Telegram polling resumed after conflict retry %d/%d",
+                    self.name, self._polling_conflict_count, MAX_CONFLICT_RETRIES,
+                )
+                self._polling_conflict_count = 0  # reset counter on success
                 return
             except Exception as retry_err:
-                logger.warning("[%s] Telegram polling retry failed: %s", self.name, retry_err)
-                # Don't fall through to fatal yet — wait for the next conflict
-                # to trigger another retry attempt (up to MAX_CONFLICT_RETRIES).
-                return
+                logger.warning(
+                    "[%s] Telegram polling retry %d/%d failed: %s. "
+                    "Scheduling next attempt.",
+                    self.name, self._polling_conflict_count, MAX_CONFLICT_RETRIES,
+                    retry_err,
+                )
+                # Schedule the next retry rather than returning silently.
+                # Returning here without either restarting polling or setting
+                # a fatal error leaves the adapter in a limbo state: the
+                # gateway process is alive and reports "connected" but
+                # no messages are received or sent.
+                if self._polling_conflict_count < MAX_CONFLICT_RETRIES:
+                    loop = asyncio.get_event_loop()
+                    self._polling_error_task = loop.create_task(
+                        self._handle_polling_conflict(retry_err)
+                    )
+                    return
+                # Fall through to fatal on the last retry.
 
-        # Exhausted retries — fatal
+        # Exhausted all retries — declare a fatal error so the gateway
+        # runner can surface this clearly and the user knows to act.
         message = (
-            "Another process is already polling this Telegram bot token "
-            "(possibly OpenClaw or another Hermes instance). "
-            "Hermes stopped Telegram polling after %d retries. "
-            "Only one poller can run per token — stop the other process "
-            "and restart with 'hermes start'."
-            % MAX_CONFLICT_RETRIES
+            "Telegram polling could not recover after %d retries (%ds total wait). "
+            "The previous gateway session is still held open on Telegram's servers, "
+            "or another process is using the same bot token. "
+            "To recover: ensure no other Hermes or OpenClaw instance is running "
+            "with this token, then restart the gateway with 'hermes gateway restart'."
+            % (MAX_CONFLICT_RETRIES, sum(10 + i * 10 for i in range(1, MAX_CONFLICT_RETRIES + 1)))
         )
-        logger.error("[%s] %s Original error: %s", self.name, message, error)
+        logger.error(
+            "[%s] %s Original error: %s",
+            self.name, message, error,
+        )
         self._set_fatal_error("telegram_polling_conflict", message, retryable=False)
         try:
             if self._app and self._app.updater:
                 await self._app.updater.stop()
         except Exception as stop_error:
-            logger.warning("[%s] Failed stopping Telegram polling after conflict: %s", self.name, stop_error, exc_info=True)
+            logger.warning(
+                "[%s] Failed stopping Telegram updater after exhausting conflict retries: %s",
+                self.name, stop_error, exc_info=True,
+            )
         await self._notify_fatal_error()
 
     async def _create_dm_topic(
@@ -1550,7 +1646,10 @@ class TelegramAdapter(BasePlatformAdapter):
                     if metadata and metadata.get("telegram_dm_topic_reply_fallback") and metadata_reply_to is not None else None
                 )
                 if metadata and metadata.get("telegram_dm_topic_reply_fallback"):
-                    should_thread = reply_to_source is not None
+                    should_thread = (
+                        reply_to_source is not None
+                        and self._reply_to_mode != "off"
+                    )
                 else:
                     should_thread = self._should_thread_reply(reply_to_source, i)
                 reply_to_id = int(reply_to_source) if should_thread and reply_to_source else None
@@ -1559,6 +1658,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     thread_id,
                     metadata,
                     reply_to_message_id=reply_to_id,
+                    reply_to_mode=self._reply_to_mode,
                 )
                 effective_thread_id = thread_kwargs.get("message_thread_id")
 
@@ -1630,15 +1730,21 @@ class TelegramAdapter(BasePlatformAdapter):
                                         thread_id,
                                         metadata,
                                         reply_to_message_id=reply_to_id,
+                                        reply_to_mode=self._reply_to_mode,
                                     )
                                     effective_thread_id = thread_kwargs.get("message_thread_id")
                                 continue
                             # Other BadRequest errors are permanent — don't retry
                             raise
-                        # TimedOut is also a subclass of NetworkError but
-                        # indicates the request may have reached the server —
-                        # retrying risks duplicate message delivery.
-                        if _TimedOut and isinstance(send_err, _TimedOut):
+                        # TimedOut is also a subclass of NetworkError. A
+                        # generic timeout may have reached Telegram, so don't
+                        # retry; a wrapped ConnectTimeout means no connection
+                        # was established, so retrying is safe.
+                        if (
+                            _TimedOut
+                            and isinstance(send_err, _TimedOut)
+                            and not self._looks_like_connect_timeout(send_err)
+                        ):
                             raise
                         if _send_attempt < 2:
                             wait = 2 ** _send_attempt
@@ -1691,11 +1797,14 @@ class TelegramAdapter(BasePlatformAdapter):
                     self.name,
                 )
                 return SendResult(success=False, error="message_too_long")
-            # TimedOut means the request may have reached Telegram —
+            # TimedOut usually means the request may have reached Telegram —
             # mark as non-retryable so _send_with_retry() doesn't re-send.
+            # Exception: wrapped ConnectTimeout, where no connection was
+            # established; retrying is safe and prevents silent drops.
             _to = locals().get("_TimedOut")
             is_timeout = (_to and isinstance(e, _to)) or "timed out" in err_str
-            return SendResult(success=False, error=str(e), retryable=not is_timeout)
+            is_connect_timeout = self._looks_like_connect_timeout(e)
+            return SendResult(success=False, error=str(e), retryable=(is_connect_timeout or not is_timeout))
 
     async def edit_message(
         self,
@@ -1795,6 +1904,33 @@ class TelegramAdapter(BasePlatformAdapter):
                         self.name, retry_err,
                     )
                     return SendResult(success=False, error=str(retry_err))
+            # Transient network errors (ConnectError, timeouts, server
+            # disconnects) should not permanently disable progress-message
+            # editing.  Mark the result retryable so the caller knows it
+            # can keep trying on the next update cycle.
+            _transient_markers = (
+                "connecterror",
+                "connect error",
+                "connection error",
+                "networkerror",
+                "network error",
+                "timed out",
+                "readtimeout",
+                "writetimeout",
+                "server disconnected",
+                "temporarily unavailable",
+                "temporary failure",
+                "httpx",
+            )
+            _is_transient = any(m in err_str for m in _transient_markers)
+            if _is_transient:
+                logger.warning(
+                    "[%s] Transient network error editing message %s (will retry): %s",
+                    self.name,
+                    message_id,
+                    e,
+                )
+                return SendResult(success=False, error=str(e), retryable=True)
             logger.error(
                 "[%s] Failed to edit Telegram message %s: %s",
                 self.name,
@@ -2095,7 +2231,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 ]
             ])
             thread_id = self._metadata_thread_id(metadata)
-            reply_to_id = self._reply_to_message_id_for_send(None, metadata)
+            reply_to_id = self._reply_to_message_id_for_send(None, metadata, reply_to_mode=self._reply_to_mode)
             msg = await self._send_message_with_thread_fallback(
                 chat_id=int(chat_id),
                 text=text,
@@ -2107,6 +2243,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     thread_id,
                     metadata,
                     reply_to_message_id=reply_to_id,
+                    reply_to_mode=self._reply_to_mode
                 ),
                 **self._link_preview_kwargs(),
             )
@@ -2165,7 +2302,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 "reply_markup": keyboard,
                 **self._link_preview_kwargs(),
             }
-            reply_to_id = self._reply_to_message_id_for_send(None, metadata)
+            reply_to_id = self._reply_to_message_id_for_send(None, metadata, reply_to_mode=self._reply_to_mode)
             kwargs["reply_to_message_id"] = reply_to_id
             kwargs.update(
                 self._thread_kwargs_for_send(
@@ -2173,6 +2310,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     thread_id,
                     metadata,
                     reply_to_message_id=reply_to_id,
+                    reply_to_mode=self._reply_to_mode
                 )
             )
 
@@ -2195,9 +2333,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
-            # Message body: render as plain text (message already contains
-            # markdown formatting from the gateway primitive).
-            preview = message if len(message) <= 3800 else message[:3800] + "..."
+            preview = self.format_message(message if len(message) <= 3800 else message[:3800] + "...")
 
             keyboard = InlineKeyboardMarkup([
                 [
@@ -2213,11 +2349,11 @@ class TelegramAdapter(BasePlatformAdapter):
             kwargs: Dict[str, Any] = {
                 "chat_id": int(chat_id),
                 "text": preview,
-                "parse_mode": ParseMode.MARKDOWN,
+                "parse_mode": ParseMode.MARKDOWN_V2,
                 "reply_markup": keyboard,
                 **self._link_preview_kwargs(),
             }
-            reply_to_id = self._reply_to_message_id_for_send(None, metadata)
+            reply_to_id = self._reply_to_message_id_for_send(None, metadata, reply_to_mode=self._reply_to_mode)
             kwargs["reply_to_message_id"] = reply_to_id
             kwargs.update(
                 self._thread_kwargs_for_send(
@@ -2225,6 +2361,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     thread_id,
                     metadata,
                     reply_to_message_id=reply_to_id,
+                    reply_to_mode=self._reply_to_mode
                 )
             )
 
@@ -2262,6 +2399,17 @@ class TelegramAdapter(BasePlatformAdapter):
             text = f"❓ {_html.escape(question)}"
             thread_id = self._metadata_thread_id(metadata)
 
+            if choices:
+                # Render full option text in the message body so mobile
+                # users can read long choices that would be truncated in
+                # inline button labels.  Buttons keep short numeric labels
+                # (1, 2, …, Other) to avoid Telegram truncation.
+                option_lines = "\n".join(
+                    f"{i + 1}. {_html.escape(str(c))}"
+                    for i, c in enumerate(choices)
+                )
+                text += f"\n\n{option_lines}"
+
             kwargs: Dict[str, Any] = {
                 "chat_id": int(chat_id),
                 "text": text,
@@ -2271,15 +2419,12 @@ class TelegramAdapter(BasePlatformAdapter):
 
             if choices:
                 # Telegram caps callback_data at 64 bytes; keep "cl:<id>:<idx>"
-                # short.  Button label is also capped (~64 chars in practice).
+                # short.
                 rows = []
-                for idx, choice in enumerate(choices):
-                    label = str(choice)
-                    if len(label) > 60:
-                        label = label[:57] + "..."
+                for idx in range(len(choices)):
                     rows.append([
                         InlineKeyboardButton(
-                            f"{idx + 1}. {label}",
+                            str(idx + 1),
                             callback_data=f"cl:{clarify_id}:{idx}",
                         )
                     ])
@@ -2361,7 +2506,7 @@ class TelegramAdapter(BasePlatformAdapter):
             )
 
             thread_id = metadata.get("thread_id") if metadata else None
-            reply_to_id = self._reply_to_message_id_for_send(None, metadata)
+            reply_to_id = self._reply_to_message_id_for_send(None, metadata, reply_to_mode=self._reply_to_mode)
             msg = await self._send_message_with_thread_fallback(
                 chat_id=int(chat_id),
                 text=text,
@@ -2373,6 +2518,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     thread_id,
                     metadata,
                     reply_to_message_id=reply_to_id,
+                    reply_to_mode=self._reply_to_mode
                 ),
                 **self._link_preview_kwargs(),
             )
@@ -2702,6 +2848,15 @@ class TelegramAdapter(BasePlatformAdapter):
                     )
                 except Exception as exc:
                     logger.error("Failed to resolve gateway approval from Telegram button: %s", exc)
+                    count = 0
+
+                # Resume the typing indicator — paused when the approval was
+                # sent (gateway/run.py).  The text /approve and /deny paths
+                # call resume_typing_for_chat here too; without it, typing
+                # stays paused for the rest of the turn after an inline
+                # button click.
+                if count and query_chat_id is not None:
+                    self.resume_typing_for_chat(str(query_chat_id))
             return
 
         # --- Slash-confirm callbacks (sc:choice:confirm_id) ---
@@ -2787,6 +2942,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                         "telegram_dm_topic_reply_fallback": True,
                                     },
                                     reply_to_message_id=reply_to_id,
+                                    reply_to_mode=self._reply_to_mode
                                 )
                             )
                         elif thread_id is not None:
@@ -2795,6 +2951,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                     str(query.message.chat_id),
                                     str(thread_id),
                                     {"thread_id": str(thread_id)},
+                                    reply_to_mode=self._reply_to_mode
                                 )
                             )
                         await self._send_message_with_thread_fallback(**send_kwargs)
@@ -2982,12 +3139,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 # .ogg / .opus files -> send as voice (round playable bubble)
                 if ext in {".ogg", ".opus"}:
                     _voice_thread = self._metadata_thread_id(metadata)
-                    reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata)
+                    reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata, reply_to_mode=self._reply_to_mode)
                     voice_thread_kwargs = self._thread_kwargs_for_send(
                         chat_id,
                         _voice_thread,
                         metadata,
                         reply_to_message_id=reply_to_id,
+                        reply_to_mode=self._reply_to_mode
                     )
                     msg = await self._send_with_dm_topic_reply_anchor_retry(
                         self._bot.send_voice,
@@ -3007,12 +3165,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 elif ext in {".mp3", ".m4a"}:
                     # Telegram's Bot API sendAudio only accepts MP3 / M4A.
                     _audio_thread = self._metadata_thread_id(metadata)
-                    reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata)
+                    reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata, reply_to_mode=self._reply_to_mode)
                     audio_thread_kwargs = self._thread_kwargs_for_send(
                         chat_id,
                         _audio_thread,
                         metadata,
                         reply_to_message_id=reply_to_id,
+                        reply_to_mode=self._reply_to_mode
                     )
                     msg = await self._send_with_dm_topic_reply_anchor_retry(
                         self._bot.send_audio,
@@ -3137,12 +3296,13 @@ class TelegramAdapter(BasePlatformAdapter):
                     "[%s] Sending media group of %d photo(s) (chunk %d/%d)",
                     self.name, len(media), chunk_idx + 1, len(chunks),
                 )
-                reply_to_id = self._reply_to_message_id_for_send(None, metadata)
+                reply_to_id = self._reply_to_message_id_for_send(None, metadata, reply_to_mode=self._reply_to_mode)
                 thread_kwargs = self._thread_kwargs_for_send(
                     chat_id,
                     _thread,
                     metadata,
                     reply_to_message_id=reply_to_id,
+                    reply_to_mode=self._reply_to_mode
                 )
 
                 def _reset_opened_files() -> None:
@@ -3201,12 +3361,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 return SendResult(success=False, error=self._missing_media_path_error("Image", image_path))
 
             _thread = self._metadata_thread_id(metadata)
-            reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata)
+            reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata, reply_to_mode=self._reply_to_mode)
             thread_kwargs = self._thread_kwargs_for_send(
                 chat_id,
                 _thread,
                 metadata,
                 reply_to_message_id=reply_to_id,
+                reply_to_mode=self._reply_to_mode
             )
             with open(image_path, "rb") as image_file:
                 msg = await self._send_with_dm_topic_reply_anchor_retry(
@@ -3295,12 +3456,13 @@ class TelegramAdapter(BasePlatformAdapter):
 
             display_name = file_name or os.path.basename(file_path)
             _thread = self._metadata_thread_id(metadata)
-            reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata)
+            reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata, reply_to_mode=self._reply_to_mode)
             thread_kwargs = self._thread_kwargs_for_send(
                 chat_id,
                 _thread,
                 metadata,
                 reply_to_message_id=reply_to_id,
+                reply_to_mode=self._reply_to_mode
             )
 
             with open(file_path, "rb") as f:
@@ -3343,12 +3505,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 return SendResult(success=False, error=self._missing_media_path_error("Video", video_path))
 
             _thread = self._metadata_thread_id(metadata)
-            reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata)
+            reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata, reply_to_mode=self._reply_to_mode)
             thread_kwargs = self._thread_kwargs_for_send(
                 chat_id,
                 _thread,
                 metadata,
                 reply_to_message_id=reply_to_id,
+                reply_to_mode=self._reply_to_mode
             )
             with open(video_path, "rb") as f:
                 msg = await self._send_with_dm_topic_reply_anchor_retry(
@@ -3395,12 +3558,13 @@ class TelegramAdapter(BasePlatformAdapter):
         try:
             # Telegram can send photos directly from URLs (up to ~5MB)
             _photo_thread = self._metadata_thread_id(metadata)
-            reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata)
+            reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata, reply_to_mode=self._reply_to_mode)
             photo_thread_kwargs = self._thread_kwargs_for_send(
                 chat_id,
                 _photo_thread,
                 metadata,
                 reply_to_message_id=reply_to_id,
+                reply_to_mode=self._reply_to_mode
             )
             msg = await self._send_with_dm_topic_reply_anchor_retry(
                 self._bot.send_photo,
@@ -3437,6 +3601,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     _photo_thread,
                     metadata,
                     reply_to_message_id=reply_to_id,
+                    reply_to_mode=self._reply_to_mode
                 )
                 msg = await self._send_with_dm_topic_reply_anchor_retry(
                     self._bot.send_photo,
@@ -3477,12 +3642,13 @@ class TelegramAdapter(BasePlatformAdapter):
         
         try:
             _anim_thread = self._metadata_thread_id(metadata)
-            reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata)
+            reply_to_id = self._reply_to_message_id_for_send(reply_to, metadata, reply_to_mode=self._reply_to_mode)
             animation_thread_kwargs = self._thread_kwargs_for_send(
                 chat_id,
                 _anim_thread,
                 metadata,
                 reply_to_message_id=reply_to_id,
+                reply_to_mode=self._reply_to_mode
             )
             msg = await self._send_with_dm_topic_reply_anchor_retry(
                 self._bot.send_animation,
@@ -3936,11 +4102,12 @@ class TelegramAdapter(BasePlatformAdapter):
         return cleaned or text
 
     def _should_process_message(self, message: Message, *, is_command: bool = False) -> bool:
-        """Apply Telegram group trigger rules.
+        """Apply Telegram group trigger rules and user allowlist.
 
-        DMs remain unrestricted. Group/supergroup messages are accepted when:
-        - the chat passes the ``allowed_chats`` whitelist (when set), or
-          ``guest_mode`` is enabled and the bot is explicitly mentioned
+        DMs and group messages are both subject to TELEGRAM_ALLOWED_USERS
+        allowlist check. The chat also passes the ``allowed_chats`` whitelist
+        (when set), or ``guest_mode`` is enabled and the bot is explicitly
+        mentioned. Group/supergroup messages are additionally accepted when:
         - the chat is explicitly allowlisted in ``free_response_chats``
         - ``require_mention`` is disabled
         - the message replies to the bot
@@ -3957,6 +4124,18 @@ class TelegramAdapter(BasePlatformAdapter):
         mentioning the bot (``@botname /command``), both of which are
         recognised as mentions by :meth:`_message_mentions_bot`.
         """
+        # Enforce TELEGRAM_ALLOWED_USERS allowlist for ALL message types
+        # (DMs and groups). Previously only callback actions were gated,
+        # leaving inbound messages unblocked (issue #23778).
+        _user = getattr(message, "from_user", None)
+        _user_id = str(getattr(_user, "id", "")) if _user else ""
+        if not self._is_callback_user_authorized(_user_id):
+            logger.warning(
+                "[%s] Unauthorized user %s — message dropped",
+                self.name, _user_id,
+            )
+            return False
+
         if not self._is_group_chat(message):
             return True
 
@@ -4650,25 +4829,28 @@ class TelegramAdapter(BasePlatformAdapter):
         elif chat.type == ChatType.CHANNEL:
             chat_type = "channel"
 
-        # Resolve DM topic name and skill binding.
-        # In private chats, only preserve thread ids for real topic messages
-        # (is_topic_message=True).  Telegram puts message_thread_id on every
-        # DM that is a reply, even when the user is just replying to a
-        # previous message in the same DM — that bogus id then routes to a
-        # nonexistent thread and Telegram returns 'Message thread not found'
-        # on send (#3206).
+        # Resolve Telegram topic name and skill binding.
+        # Only preserve message_thread_id when Telegram marks the message as
+        # a real topic/forum message. Telegram can also populate
+        # message_thread_id for ordinary reply UI anchors; treating those as
+        # durable session threads fragments workflows such as CAPTCHA/login
+        # handoffs where the user later replies "done" in the same group.
+        # Private chats have the same pitfall: only real DM topic messages
+        # (is_topic_message=True) should keep the thread id, otherwise sends
+        # can hit Telegram's 'Message thread not found' error (#3206).
         thread_id_raw = message.message_thread_id
         is_topic_message = bool(getattr(message, "is_topic_message", False))
+        is_forum_group = getattr(chat, "is_forum", False) is True
         thread_id_str = None
         if thread_id_raw is not None:
-            if chat_type == "group":
+            if chat_type == "group" and (is_topic_message or is_forum_group):
                 thread_id_str = str(thread_id_raw)
             elif chat_type == "dm" and is_topic_message:
                 thread_id_str = str(thread_id_raw)
         # For forum groups without an explicit topic, default to the
         # General-topic id so the gateway routes back to the General topic
         # rather than dropping into the bot's main channel (#22423).
-        if chat_type == "group" and thread_id_str is None and getattr(chat, "is_forum", False):
+        if chat_type == "group" and thread_id_str is None and is_forum_group:
             thread_id_str = self._GENERAL_TOPIC_THREAD_ID
         chat_topic = None
         topic_skill = None
@@ -4709,6 +4891,7 @@ class TelegramAdapter(BasePlatformAdapter):
             user_name=user.full_name if user else (chat.full_name if hasattr(chat, "full_name") and chat_type == "dm" else None),
             thread_id=thread_id_str,
             chat_topic=chat_topic,
+            message_id=str(message.message_id),
         )
         
         # Extract reply context if this message is a reply.

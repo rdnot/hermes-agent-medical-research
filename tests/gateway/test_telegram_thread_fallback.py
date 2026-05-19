@@ -134,6 +134,70 @@ def _make_adapter():
     return adapter
 
 
+def test_non_forum_group_reply_thread_id_does_not_fork_session_key():
+    """Reply-derived thread ids in ordinary groups must not create topic lanes."""
+    from gateway.platforms import telegram as telegram_mod
+
+    adapter = _make_adapter()
+    message = SimpleNamespace(
+        text="Done",
+        caption=None,
+        chat=SimpleNamespace(
+            id=-100123,
+            type=telegram_mod.ChatType.SUPERGROUP,
+            is_forum=False,
+            title="Regular group",
+        ),
+        from_user=SimpleNamespace(id=456, full_name="Alice"),
+        message_thread_id=461,
+        is_topic_message=False,
+        reply_to_message=SimpleNamespace(
+            message_id=460,
+            text="Please complete the CAPTCHA/login, then reply done.",
+            caption=None,
+        ),
+        message_id=462,
+        date=None,
+    )
+
+    event = adapter._build_message_event(message, msg_type=MessageType.TEXT)
+
+    assert event.source.chat_id == "-100123"
+    assert event.source.chat_type == "group"
+    assert event.source.thread_id is None
+    assert build_session_key(event.source) == "agent:main:telegram:group:-100123:456"
+
+
+def test_forum_group_topic_message_preserves_thread_session_key():
+    """Real Telegram forum-topic messages should still route by topic id."""
+    from gateway.platforms import telegram as telegram_mod
+
+    adapter = _make_adapter()
+    message = SimpleNamespace(
+        text="hello from topic",
+        caption=None,
+        chat=SimpleNamespace(
+            id=-100123,
+            type=telegram_mod.ChatType.SUPERGROUP,
+            is_forum=True,
+            title="Forum group",
+        ),
+        from_user=SimpleNamespace(id=456, full_name="Alice"),
+        message_thread_id=17585,
+        is_topic_message=True,
+        reply_to_message=None,
+        message_id=10,
+        date=None,
+    )
+
+    event = adapter._build_message_event(message, msg_type=MessageType.TEXT)
+
+    assert event.source.chat_id == "-100123"
+    assert event.source.chat_type == "group"
+    assert event.source.thread_id == "17585"
+    assert build_session_key(event.source) == "agent:main:telegram:group:-100123:17585"
+
+
 def test_forum_general_topic_without_message_thread_id_keeps_thread_context():
     """Forum General-topic messages should keep synthetic thread context."""
     from gateway.platforms import telegram as telegram_mod
@@ -331,7 +395,25 @@ def test_base_gateway_metadata_marks_telegram_dm_topics_as_reply_fallback():
     assert metadata == {
         "thread_id": "20189",
         "telegram_dm_topic_reply_fallback": True,
+        "direct_messages_topic_id": "20189",
         "telegram_reply_to_message_id": "462",
+    }
+
+
+def test_base_gateway_metadata_for_resumed_telegram_dm_topic_uses_direct_topic():
+    """Resumed/synthetic DM-topic events may have no reply anchor."""
+    source = SimpleNamespace(
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        thread_id="20189",
+    )
+
+    metadata = _thread_metadata_for_source(source)
+
+    assert metadata == {
+        "thread_id": "20189",
+        "telegram_dm_topic_reply_fallback": True,
+        "direct_messages_topic_id": "20189",
     }
 
 
@@ -533,7 +615,7 @@ async def test_send_model_picker_uses_metadata_reply_fallback_for_dm_topics():
 
 @pytest.mark.asyncio
 async def test_send_dm_topic_fallback_without_anchor_does_not_crash():
-    """DM-topic fallback without an anchor must not use message_thread_id alone."""
+    """DM-topic fallback without an anchor uses direct topic routing."""
     adapter = _make_adapter()
     call_log = []
 
@@ -549,13 +631,14 @@ async def test_send_dm_topic_fallback_without_anchor_does_not_crash():
         metadata={
             "thread_id": "20197",
             "telegram_dm_topic_reply_fallback": True,
+            "direct_messages_topic_id": "20197",
         },
     )
 
     assert result.success is True
     assert call_log[0]["reply_to_message_id"] is None
-    assert "message_thread_id" not in call_log[0]
-    assert "direct_messages_topic_id" not in call_log[0]
+    assert call_log[0]["message_thread_id"] is None
+    assert call_log[0]["direct_messages_topic_id"] == 20197
 
 
 @pytest.mark.asyncio
@@ -1010,6 +1093,63 @@ async def test_send_does_not_retry_timeout():
     assert "Timed out" in result.error
     # CRITICAL: only 1 attempt — no retry for TimedOut
     assert attempt[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_send_retries_wrapped_connect_timeout():
+    """Retry TimedOut only when it wraps a TCP connect timeout.
+
+    A generic Telegram TimedOut may have reached Telegram and must not be
+    retried, but an underlying ConnectTimeout means the connection was never
+    established. Retrying prevents a silent drop without risking duplicates.
+    """
+    adapter = _make_adapter()
+
+    class FakeConnectTimeout(Exception):
+        pass
+
+    attempt = [0]
+
+    async def mock_send_message(**kwargs):
+        attempt[0] += 1
+        if attempt[0] < 3:
+            err = FakeTimedOut("Timed out")
+            err.__cause__ = FakeConnectTimeout("connect timed out")
+            raise err
+        return SimpleNamespace(message_id=201)
+
+    adapter._bot = SimpleNamespace(send_message=mock_send_message)
+
+    result = await adapter.send(chat_id="123", content="test message")
+
+    assert result.success is True
+    assert result.message_id == "201"
+    assert attempt[0] == 3
+
+
+@pytest.mark.asyncio
+async def test_send_marks_wrapped_connect_timeout_retryable_after_exhaustion():
+    """Final SendResult remains retryable for outer gateway retry handling."""
+    adapter = _make_adapter()
+
+    class FakeConnectTimeout(Exception):
+        pass
+
+    attempt = [0]
+
+    async def mock_send_message(**kwargs):
+        attempt[0] += 1
+        err = FakeTimedOut("Timed out")
+        err.__context__ = FakeConnectTimeout("ConnectTimeout")
+        raise err
+
+    adapter._bot = SimpleNamespace(send_message=mock_send_message)
+
+    result = await adapter.send(chat_id="123", content="test message")
+
+    assert result.success is False
+    assert result.retryable is True
+    assert attempt[0] == 3
 
 
 @pytest.mark.asyncio

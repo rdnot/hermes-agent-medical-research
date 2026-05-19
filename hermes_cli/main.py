@@ -1302,6 +1302,18 @@ def _launch_tui(
             except Exception:
                 pass
 
+    # Exit code 42 = TUI requested an update. Relaunch as `hermes update` so
+    # the user sees update output directly and gets the new version.
+    # preserve_inherited=False ensures --tui and other flags are NOT carried
+    # into the update subcommand.
+    if code == 42:
+        from hermes_cli.relaunch import relaunch
+
+        print()
+        print("⚕ Launching update...")
+        print()
+        relaunch(["update"], preserve_inherited=False)
+
     sys.exit(code)
 
 
@@ -2010,7 +2022,7 @@ def select_provider_and_model(args=None):
     elif selected_provider == "openai-codex":
         _model_flow_openai_codex(config, current_model)
     elif selected_provider == "xai-oauth":
-        _model_flow_xai_oauth(config, current_model)
+        _model_flow_xai_oauth(config, current_model, args=args)
     elif selected_provider == "qwen-oauth":
         _model_flow_qwen_oauth(config, current_model)
     elif selected_provider == "minimax-oauth":
@@ -2130,7 +2142,6 @@ _AUX_TASKS: list[tuple[str, str, str]] = [
     ("vision", "Vision", "image/screenshot analysis"),
     ("compression", "Compression", "context summarization"),
     ("web_extract", "Web extract", "web page summarization"),
-    ("session_search", "Session search", "past-conversation recall"),
     ("approval", "Approval", "smart command approval"),
     ("mcp", "MCP", "MCP tool reasoning"),
     ("title_generation", "Title generation", "session titles"),
@@ -2892,7 +2903,7 @@ def _model_flow_openai_codex(config, current_model=""):
         print("No change.")
 
 
-def _model_flow_xai_oauth(_config, current_model=""):
+def _model_flow_xai_oauth(_config, current_model="", *, args=None):
     """xAI Grok OAuth (SuperGrok Subscription) provider: ensure logged in, then pick model."""
     from hermes_cli.auth import (
         get_xai_oauth_auth_status,
@@ -2923,7 +2934,15 @@ def _model_flow_xai_oauth(_config, current_model=""):
             print("Starting a fresh xAI OAuth login...")
             print()
             try:
-                mock_args = argparse.Namespace()
+                # Forward CLI flags from ``hermes model --manual-paste``
+                # / ``--no-browser`` / ``--timeout`` into the loopback
+                # login. Without this, browser-only remotes (#26923)
+                # can't reach the manual-paste path via ``hermes model``.
+                mock_args = argparse.Namespace(
+                    manual_paste=bool(getattr(args, "manual_paste", False)),
+                    no_browser=bool(getattr(args, "no_browser", False)),
+                    timeout=getattr(args, "timeout", None),
+                )
                 _login_xai_oauth(
                     mock_args,
                     PROVIDER_REGISTRY["xai-oauth"],
@@ -2941,7 +2960,11 @@ def _model_flow_xai_oauth(_config, current_model=""):
         print("Not logged into xAI Grok OAuth (SuperGrok Subscription). Starting login...")
         print()
         try:
-            mock_args = argparse.Namespace()
+            mock_args = argparse.Namespace(
+                manual_paste=bool(getattr(args, "manual_paste", False)),
+                no_browser=bool(getattr(args, "no_browser", False)),
+                timeout=getattr(args, "timeout", None),
+            )
             _login_xai_oauth(mock_args, PROVIDER_REGISTRY["xai-oauth"])
         except SystemExit:
             print("Login cancelled or failed.")
@@ -8465,6 +8488,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 launch_detached_profile_gateway_restart,
                 _get_service_pids,
                 _graceful_restart_via_sigusr1,
+                _wait_for_gateway_exit,
             )
             import signal as _signal
 
@@ -8883,6 +8907,21 @@ def _cmd_update_impl(args, gateway_mode: bool):
                         os.kill(pid, _signal.SIGTERM)
                     except (ProcessLookupError, PermissionError):
                         pass
+                # Wait for the old process to fully exit before the watcher
+                # spawns the new gateway.  Telegram holds the previous
+                # getUpdates long-poll session open on its servers for up to
+                # ~30s after the client disconnects.  If the new gateway
+                # connects before that window expires it receives a 409
+                # Conflict, which _handle_polling_conflict() recovers from
+                # via back-off retries — but a brief wait here reduces the
+                # chance of hitting that path at all, especially on fast
+                # machines where the watcher loop restarts in < 1s.
+                # We wait up to 5s for the process to exit (the OS-level
+                # close, not the Telegram server-side expiry), then let the
+                # watcher take over.  The Telegram adapter's retry logic
+                # handles any remaining 409s if the server session is still
+                # live when the new gateway polls.
+                _wait_for_gateway_exit(timeout=5.0, force_after=None)
                 killed_pids.add(pid)
                 relaunched_profiles.append(proc.profile)
 
@@ -9881,7 +9920,7 @@ def _build_provider_choices() -> list[str]:
 # to parse.
 _BUILTIN_SUBCOMMANDS = frozenset(
     {
-        "acp", "auth", "backup", "checkpoints", "claw", "completion",
+        "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
         "config", "cron", "curator", "dashboard", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
@@ -10029,6 +10068,16 @@ def main():
         "--no-browser",
         action="store_true",
         help="Do not attempt to open the browser automatically during Nous login",
+    )
+    model_parser.add_argument(
+        "--manual-paste",
+        action="store_true",
+        help=(
+            "For loopback OAuth providers (xai-oauth, ...): skip the local "
+            "callback listener and paste the failed callback URL from your "
+            "browser instead. Use on browser-only remotes (Cloud Shell, "
+            "Codespaces, EC2 Instance Connect, ...). See #26923."
+        ),
     )
     model_parser.add_argument(
         "--timeout",
@@ -10253,7 +10302,7 @@ def main():
     proxy_start.add_argument(
         "--provider",
         default="nous",
-        help="Upstream provider (default: nous). See `hermes proxy providers`.",
+        help="Upstream provider: nous or xai (default: nous). See `hermes proxy providers`.",
     )
     proxy_start.add_argument(
         "--host",
@@ -10491,6 +10540,17 @@ def main():
         "--no-browser",
         action="store_true",
         help="Do not auto-open a browser for OAuth login",
+    )
+    auth_add.add_argument(
+        "--manual-paste",
+        action="store_true",
+        help=(
+            "Skip the loopback callback listener and paste the failed "
+            "callback URL from your browser instead. Use this on "
+            "browser-only remotes (GCP Cloud Shell, GitHub Codespaces, "
+            "EC2 Instance Connect, ...) where 127.0.0.1 on the remote "
+            "isn't reachable from your laptop. See #26923."
+        ),
     )
     auth_add.add_argument(
         "--timeout", type=float, help="OAuth/network timeout in seconds"
@@ -11293,6 +11353,22 @@ Examples:
             skills_command(args)
 
     skills_parser.set_defaults(func=cmd_skills)
+
+    # =========================================================================
+    # bundles command — skill bundles (alias /<name> for multiple skills)
+    # =========================================================================
+    bundles_parser = subparsers.add_parser(
+        "bundles",
+        help="Create, list, and manage skill bundles (aliases for multiple skills)",
+        description=(
+            "Skill bundles let you load several skills under one slash "
+            "command. `/<bundle>` from the CLI or gateway loads every "
+            "referenced skill at once."
+        ),
+    )
+    from hermes_cli.bundles import register_cli as _bundles_register, bundles_command
+    _bundles_register(bundles_parser)
+    bundles_parser.set_defaults(func=bundles_command)
 
     # =========================================================================
     # plugins command
@@ -12660,7 +12736,7 @@ Examples:
 
             discover_plugins()
         except Exception:
-            logger.debug(
+            logger.warning(
                 "plugin discovery failed at CLI startup",
                 exc_info=True,
             )
