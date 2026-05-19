@@ -1527,28 +1527,11 @@ class TelegramAdapter(BasePlatformAdapter):
                     BotCommandScopeDefault,
                     BotCommandScopeChat,
                 )
-                from hermes_cli.commands import (
-                    telegram_menu_commands,
-                    telegram_quick_menu_commands,
-                )
+                from hermes_cli.commands import telegram_menu_commands
                 # Telegram allows up to 100 commands but has an undocumented
                 # payload size limit (~4KB total).  Limit to 30 core commands
                 # to stay well under the threshold while covering all categories.
-                if self.config.extra.get("command_menu") == "quick_commands_only":
-                    # Fetch quick_commands via the gateway runner reference if
-                    # available; otherwise fall back to PlatformConfig.extra.
-                    _qc = self.config.extra.get("quick_commands")
-                    if not isinstance(_qc, dict) or not _qc:
-                        _runner_ref = getattr(self, "_runner_ref", None)
-                        _runner = _runner_ref() if callable(_runner_ref) else None
-                        _gw_cfg = getattr(_runner, "config", None) if _runner else None
-                        _qc = getattr(_gw_cfg, "quick_commands", {}) or {}
-                    menu_commands, hidden_count = telegram_quick_menu_commands(
-                        _qc,
-                        max_commands=MAX_COMMANDS_PER_SCOPE,
-                    )
-                else:
-                    menu_commands, hidden_count = telegram_menu_commands(max_commands=MAX_COMMANDS_PER_SCOPE)
+                menu_commands, hidden_count = telegram_menu_commands(max_commands=MAX_COMMANDS_PER_SCOPE)
                 bot_commands = [BotCommand(name, desc) for name, desc in menu_commands]
                 # Register for all scopes independently — Telegram picks the
                 # narrowest matching scope per chat type (forum topics fall
@@ -4449,12 +4432,11 @@ class TelegramAdapter(BasePlatformAdapter):
         return cleaned or text
 
     def _should_process_message(self, message: Message, *, is_command: bool = False) -> bool:
-        """Apply Telegram group trigger rules and user allowlist.
+        """Apply Telegram group trigger rules.
 
-        DMs and group messages are both subject to TELEGRAM_ALLOWED_USERS
-        allowlist check. The chat also passes the ``allowed_chats`` whitelist
-        (when set), or ``guest_mode`` is enabled and the bot is explicitly
-        mentioned. Group/supergroup messages are additionally accepted when:
+        DMs remain unrestricted. Group/supergroup messages are accepted when:
+        - the chat passes the ``allowed_chats`` whitelist (when set), or
+          ``guest_mode`` is enabled and the bot is explicitly mentioned
         - the chat is explicitly allowlisted in ``free_response_chats``
         - ``require_mention`` is disabled
         - the message replies to the bot
@@ -4471,18 +4453,6 @@ class TelegramAdapter(BasePlatformAdapter):
         mentioning the bot (``@botname /command``), both of which are
         recognised as mentions by :meth:`_message_mentions_bot`.
         """
-        # Enforce TELEGRAM_ALLOWED_USERS allowlist for ALL message types
-        # (DMs and groups). Previously only callback actions were gated,
-        # leaving inbound messages unblocked (issue #23778).
-        _user = getattr(message, "from_user", None)
-        _user_id = str(getattr(_user, "id", "")) if _user else ""
-        if not self._is_callback_user_authorized(_user_id):
-            logger.warning(
-                "[%s] Unauthorized user %s — message dropped",
-                self.name, _user_id,
-            )
-            return False
-
         if not self._is_group_chat(message):
             return True
 
@@ -5432,25 +5402,16 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
 
     async def on_processing_start(self, event: MessageEvent) -> None:
-        """Add an in-progress reaction and pin the message when processing begins."""
+        """Add an in-progress reaction when message processing begins."""
+        if not self._reactions_enabled():
+            return
         chat_id = getattr(event.source, "chat_id", None)
         message_id = getattr(event, "message_id", None)
         if chat_id and message_id:
-            if self._reactions_enabled():
-                await self._set_reaction(chat_id, message_id, "\U0001f440")
-            # Pin the incoming message for the duration of the turn
-            if self._bot:
-                try:
-                    await self._bot.pin_chat_message(
-                        chat_id=int(chat_id),
-                        message_id=int(message_id),
-                        disable_notification=True,
-                    )
-                except Exception:
-                    logger.debug("[Telegram] Failed to pin message %s in chat %s", message_id, chat_id)
+            await self._set_reaction(chat_id, message_id, "\U0001f440")
 
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
-        """Swap the in-progress reaction for a final success/failure reaction and unpin.
+        """Swap the in-progress reaction for a final success/failure reaction.
 
         Unlike Discord (additive reactions), Telegram's set_message_reaction
         replaces all existing reactions in one call — no remove step needed.
@@ -5462,25 +5423,17 @@ class TelegramAdapter(BasePlatformAdapter):
         another agent run to swap it to 👍/👎 — which never happens if the
         cancellation was the last activity in the chat.
         """
+        if not self._reactions_enabled():
+            return
         chat_id = getattr(event.source, "chat_id", None)
         message_id = getattr(event, "message_id", None)
         if not (chat_id and message_id):
             return
-        if self._reactions_enabled():
-            if outcome == ProcessingOutcome.CANCELLED:
-                await self._clear_reactions(chat_id, message_id)
-            else:
-                await self._set_reaction(
-                    chat_id,
-                    message_id,
-                    "\U0001f44d" if outcome == ProcessingOutcome.SUCCESS else "\U0001f44e",
-                )
-        # Unpin the message when processing is complete
-        if self._bot:
-            try:
-                await self._bot.unpin_chat_message(
-                    chat_id=int(chat_id),
-                    message_id=int(message_id),
-                )
-            except Exception:
-                logger.debug("[Telegram] Failed to unpin message %s in chat %s", message_id, chat_id)
+        if outcome == ProcessingOutcome.CANCELLED:
+            await self._clear_reactions(chat_id, message_id)
+        else:
+            await self._set_reaction(
+                chat_id,
+                message_id,
+                "\U0001f44d" if outcome == ProcessingOutcome.SUCCESS else "\U0001f44e",
+            )
