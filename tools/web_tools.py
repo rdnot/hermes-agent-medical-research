@@ -962,6 +962,13 @@ def _is_content_sufficient(content_bytes: bytes, url: str) -> bool:
     if '<div id="root"></div>' in raw or '<div id="app"></div>' in raw:
         return False
     if any(sig in raw for sig in ["enable javascript", "requires javascript", "javascript is required"]):
+        # False positive: NCBI Bookshelf pages contain "requires javascript" in a header banner
+        # but ship full SSR content (not a JS shell). Strong markers of real NCBI content:
+        if "ncbi.nlm.nih.gov" in url.lower() and any(m in raw for m in [
+            "statpearls", "bookshelf", "citation_title", "ncbi_acc",
+            "ncbi_bookparttype", "ncbi_pagename", "continuing education",
+        ]):
+            return True
         return False
 
     if "reddit.com" in url.lower():
@@ -1159,7 +1166,7 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
                 # Use shorter timeout for CF sites (30s), longer for Reddit/SPA (45s)
                 fetch_timeout = 30000 if solve_cf else min(timeout * 1000, 45000)
                 fetch_kwargs = dict(
-                    url,
+                    url=url,
                     network_idle=False,
                     adaptive=True,
                     timeout_ms=fetch_timeout,
