@@ -1174,16 +1174,39 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
                 # Attach the reCAPTCHA wait callback for PubMed/PMC URLs
                 if _pubmed_recaptcha_action is not None:
                     fetch_kwargs["page_action"] = _pubmed_recaptcha_action
-                resp = await session.fetch(**fetch_kwargs)
+                # Hard timeout for the entire scrapling fetch including CF solving.
+                # Scrapling's _cloudflare_solver has unbounded recursion — each attempt
+                # takes ~12s, so without a cap it loops forever on unsolvable challenges.
+                _scrapling_hard_timeout = 45 if solve_cf else 60
+                try:
+                    resp = await asyncio.wait_for(
+                        session.fetch(**fetch_kwargs),
+                        timeout=_scrapling_hard_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Scrapling fetch timed out after %ds (CF solve=%s) — "
+                        "Cloudflare challenge likely unsolvable, skipping to next tier",
+                        _scrapling_hard_timeout, solve_cf,
+                    )
+                    resp = None
                 if resp and resp.status < 400:
                     content = resp.body
                     # Scrapling may return bytes or str
                     if isinstance(content, str):
                         content = content.encode("utf-8", errors="replace")
-                    content_type = resp.headers.get("content-type", "text/html") if resp.headers else "text/html"
-                    headers = dict(resp.headers or {})
-                    logger.debug("Scrapling fetch succeeded (status=%d)", resp.status)
-                    return content, headers, resp.status, "scrapling"
+                    # Reject results that are still a Cloudflare challenge page
+                    # (scrapling solver may return without actually solving it)
+                    if solve_cf and _is_cloudflare_protected(resp.status, content):
+                        logger.warning(
+                            "Scrapling returned content still showing Cloudflare challenge — "
+                            "solver failed, skipping to next tier"
+                        )
+                    else:
+                        content_type = resp.headers.get("content-type", "text/html") if resp.headers else "text/html"
+                        headers = dict(resp.headers or {})
+                        logger.debug("Scrapling fetch succeeded (status=%d)", resp.status)
+                        return content, headers, resp.status, "scrapling"
                 logger.debug("Scrapling returned status %d", resp.status if resp else -1)
             finally:
                 await session.close()
