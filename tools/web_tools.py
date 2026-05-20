@@ -950,6 +950,14 @@ def _is_content_sufficient(content_bytes: bytes, url: str) -> bool:
     if len(raw) < 8000:
         return False
 
+    # Cloudflare challenge page — not real content, escalate to browser tier
+    # (checked here so curl_cffi returns False → falls through to Scrapling)
+    if any(sig in raw for sig in [
+        "just a moment", "checking your browser",
+        "cf-browser-verification", "cf_chl_opt", "challenge-platform",
+    ]):
+        return False
+
     # Generic JS-shell signals (framework-agnostic)
     if '<div id="root"></div>' in raw or '<div id="app"></div>' in raw:
         return False
@@ -1051,8 +1059,8 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
         url = _convert_reddit_url(url)
         logger.debug("Reddit: fetching JSON API endpoint: %s", url)
 
-    # PubMed blocks curl_cffi and httpx with reCAPTCHA — skip curl_cffi, go straight to Scrapling
-    is_pubmed = "pubmed.ncbi.nlm.nih.gov" in url.lower()
+    # PubMed/PMC blocks curl_cffi and httpx with Cloudflare — skip curl_cffi, go straight to Scrapling
+    is_pubmed = "pubmed.ncbi.nlm.nih.gov" in url.lower() or "pmc.ncbi.nlm.nih.gov" in url.lower()
     if is_pubmed:
         logger.debug("PubMed detected — skipping curl_cffi, routing through Scrapling")
 
