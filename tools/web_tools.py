@@ -1037,6 +1037,19 @@ def _html_to_text(html: str, url: str = "") -> str:
     return text or html
 
 
+def _is_recaptcha_challenge(content_bytes: bytes) -> bool:
+    """
+    Detect Google reCAPTCHA Enterprise challenge pages (HTTP 200).
+    PMC/PubMed serves these as an interstitial before the real article.
+    The page contains 'Checking your browser' and loads grecaptcha.enterprise.js.
+    """
+    try:
+        raw = content_bytes.decode("utf-8", errors="replace").lower()
+    except Exception:
+        return False
+    return "checking your browser" in raw and "recaptcha" in raw
+
+
 async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str]:
     """
     Fetch URL bytes with tiered fallback strategy:
@@ -1091,6 +1104,51 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
                 logger.debug("Cloudflare detected → enabling solve_cloudflare")
             logger.debug("Fetching with Scrapling: %s (cf_solve=%s)", url, solve_cf)
 
+            # ── PubMed/PMC reCAPTCHA Enterprise page_action callback ──
+            # PMC serves a Google reCAPTCHA Enterprise challenge (HTTP 200) that
+            # sets a cookie (recaptcha-ca-e / recaptcha-fastly-e / recaptcha-cf-e)
+            # after invisible reCAPTCHA solves, then calls location.reload(true).
+            # Scrapling's fetch() would return the initial challenge HTML before the
+            # redirect fires. This page_action runs after navigation + CF solving,
+            # detects the reCAPTCHA challenge page, waits for the cookie, and lets
+            # the page reload before Scrapling captures the response.
+            _pubmed_recaptcha_action = None
+            if is_pubmed:
+
+                async def _pubmed_recaptcha_action(page):
+                    """Wait for PubMed/PMC reCAPTCHA cookie + redirect inside Scrapling."""
+                    try:
+                        page_html = await page.content()
+                        if not _is_recaptcha_challenge(page_html.encode("utf-8", errors="replace")):
+                            return  # Not a reCAPTCHA page — nothing to do
+                        logger.info("PubMed reCAPTCHA challenge detected — waiting for cookie + redirect")
+                        # Poll for the reCAPTCHA success cookie (up to 15s)
+                        _recaptcha_cookies = {
+                            "recaptcha-ca-e", "recaptcha-fastly-e",
+                            "recaptcha-cf-e", "recaptcha-akam-e",
+                        }
+                        for _ in range(150):
+                            cookies = await page.context.cookies()
+                            cookie_names = {c["name"] for c in cookies}
+                            if cookie_names & _recaptcha_cookies:
+                                logger.debug("reCAPTCHA cookie detected, waiting for page reload")
+                                # Wait for location.reload(true) to fire and new page to load
+                                try:
+                                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                                except Exception:
+                                    pass
+                                # Extra settle for dynamic content rendering
+                                await page.wait_for_timeout(1500)
+                                logger.info("PubMed: reCAPTCHA bypassed, page reloaded")
+                                return
+                            await page.wait_for_timeout(100)
+                        # Cookie not seen in 15s — try a manual reload as last resort
+                        logger.debug("PubMed: reCAPTCHA cookie not detected, attempting page.reload()")
+                        await page.reload(wait_until="domcontentloaded")
+                        await page.wait_for_timeout(2000)
+                    except Exception as rc_err:
+                        logger.debug("PubMed reCAPTCHA page_action failed: %s", rc_err)
+
             session = AsyncStealthySession(
                 headless=True,
                 solve_cloudflare=solve_cf,
@@ -1100,12 +1158,16 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
                 # network_idle=False — Reddit/CF never fully idle (polls, pings)
                 # Use shorter timeout for CF sites (30s), longer for Reddit/SPA (45s)
                 fetch_timeout = 30000 if solve_cf else min(timeout * 1000, 45000)
-                resp = await session.fetch(
+                fetch_kwargs = dict(
                     url,
                     network_idle=False,
                     adaptive=True,
                     timeout_ms=fetch_timeout,
                 )
+                # Attach the reCAPTCHA wait callback for PubMed/PMC URLs
+                if _pubmed_recaptcha_action is not None:
+                    fetch_kwargs["page_action"] = _pubmed_recaptcha_action
+                resp = await session.fetch(**fetch_kwargs)
                 if resp and resp.status < 400:
                     content = resp.body
                     # Scrapling may return bytes or str
