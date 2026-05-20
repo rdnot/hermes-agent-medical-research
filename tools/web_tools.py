@@ -1156,60 +1156,82 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
                     except Exception as rc_err:
                         logger.debug("PubMed reCAPTCHA page_action failed: %s", rc_err)
 
-            session = AsyncStealthySession(
-                headless=True,
-                solve_cloudflare=solve_cf,
-            )
-            await session.start()
-            try:
-                # network_idle=False — Reddit/CF never fully idle (polls, pings)
-                # Use shorter timeout for CF sites (30s), longer for Reddit/SPA (45s)
-                fetch_timeout = 30000 if solve_cf else min(timeout * 1000, 45000)
-                fetch_kwargs = dict(
-                    url=url,
-                    network_idle=False,
-                    adaptive=True,
-                    timeout_ms=fetch_timeout,
+            # PubMed/PMC: retry up to 2 attempts if reCAPTCHA challenge persists
+            _pubmed_max_attempts = 2 if is_pubmed else 1
+
+            for _pubmed_attempt in range(_pubmed_max_attempts):
+                logger.debug(
+                    "AsyncStealthySession fetch (attempt %d/%d): %s",
+                    _pubmed_attempt + 1, _pubmed_max_attempts, url,
                 )
-                # Attach the reCAPTCHA wait callback for PubMed/PMC URLs
-                if _pubmed_recaptcha_action is not None:
-                    fetch_kwargs["page_action"] = _pubmed_recaptcha_action
-                # Hard timeout for the entire scrapling fetch including CF solving.
-                # Scrapling's _cloudflare_solver has unbounded recursion — each attempt
-                # takes ~12s, so without a cap it loops forever on unsolvable challenges.
-                _scrapling_hard_timeout = 45 if solve_cf else 60
+                session = AsyncStealthySession(
+                    headless=True,
+                    solve_cloudflare=solve_cf,
+                )
+                await session.start()
                 try:
-                    resp = await asyncio.wait_for(
-                        session.fetch(**fetch_kwargs),
-                        timeout=_scrapling_hard_timeout,
+                    # network_idle=False — Reddit/CF never fully idle (polls, pings)
+                    # Use shorter timeout for CF sites (30s), longer for Reddit/SPA (45s)
+                    fetch_timeout = 30000 if solve_cf else min(timeout * 1000, 45000)
+                    fetch_kwargs = dict(
+                        url=url,
+                        network_idle=False,
+                        adaptive=True,
+                        timeout_ms=fetch_timeout,
                     )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "Scrapling fetch timed out after %ds (CF solve=%s) — "
-                        "Cloudflare challenge likely unsolvable, skipping to next tier",
-                        _scrapling_hard_timeout, solve_cf,
-                    )
-                    resp = None
-                if resp and resp.status < 400:
-                    content = resp.body
-                    # Scrapling may return bytes or str
-                    if isinstance(content, str):
-                        content = content.encode("utf-8", errors="replace")
-                    # Reject results that are still a Cloudflare challenge page
-                    # (scrapling solver may return without actually solving it)
-                    if solve_cf and _is_cloudflare_protected(resp.status, content):
-                        logger.warning(
-                            "Scrapling returned content still showing Cloudflare challenge — "
-                            "solver failed, skipping to next tier"
+                    # Attach the reCAPTCHA wait callback for PubMed/PMC URLs
+                    if _pubmed_recaptcha_action is not None:
+                        fetch_kwargs["page_action"] = _pubmed_recaptcha_action
+                    # Hard timeout for the entire scrapling fetch including CF solving.
+                    # Scrapling's _cloudflare_solver has unbounded recursion — each attempt
+                    # takes ~12s, so without a cap it loops forever on unsolvable challenges.
+                    _scrapling_hard_timeout = 45 if solve_cf else 60
+                    try:
+                        resp = await asyncio.wait_for(
+                            session.fetch(**fetch_kwargs),
+                            timeout=_scrapling_hard_timeout,
                         )
-                    else:
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "Scrapling fetch timed out after %ds (CF solve=%s) — "
+                            "Cloudflare challenge likely unsolvable, skipping to next tier",
+                            _scrapling_hard_timeout, solve_cf,
+                        )
+                        resp = None
+                    if resp and resp.status < 400:
+                        content = resp.body
+                        # Scrapling may return bytes or str
+                        if isinstance(content, str):
+                            content = content.encode("utf-8", errors="replace")
+                        # Reject results that are still a Cloudflare challenge page
+                        # (scrapling solver may return without actually solving it)
+                        if solve_cf and _is_cloudflare_protected(resp.status, content):
+                            logger.warning(
+                                "Scrapling returned content still showing Cloudflare challenge — "
+                                "solver failed, skipping to next tier"
+                            )
+                            break  # CF unsolvable, don't retry
+                        # Reject results still showing reCAPTCHA challenge — retry
+                        if is_pubmed and _is_recaptcha_challenge(content):
+                            if _pubmed_attempt < _pubmed_max_attempts - 1:
+                                logger.info(
+                                    "PubMed: reCAPTCHA still present after attempt %d/%d, retrying…",
+                                    _pubmed_attempt + 1, _pubmed_max_attempts,
+                                )
+                                continue
+                            else:
+                                logger.warning(
+                                    "PubMed: reCAPTCHA still present after %d attempts, skipping to next tier",
+                                    _pubmed_max_attempts,
+                                )
+                                break
                         content_type = resp.headers.get("content-type", "text/html") if resp.headers else "text/html"
                         headers = dict(resp.headers or {})
                         logger.debug("Scrapling fetch succeeded (status=%d)", resp.status)
                         return content, headers, resp.status, "scrapling"
-                logger.debug("Scrapling returned status %d", resp.status if resp else -1)
-            finally:
-                await session.close()
+                    logger.debug("Scrapling returned status %d", resp.status if resp else -1)
+                finally:
+                    await session.close()
         except Exception as e:
             logger.debug("Scrapling failed: %s", e)
 
