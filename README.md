@@ -41,6 +41,7 @@
 - **MAX_OUTPUT_SIZE = 10,000** (upstream: 5,000)
 - **`web_extract` max_result_size_chars = 500,000** (upstream: 100,000)
 - **Auto-fallback**: Local extract fails → falls back to `web.backend`, skips search-only backends
+- **PubMed/PMC hardening**: reCAPTCHA retry + article-content validator (rejects HTTP-200 title-only shells); Jina Reader fallback for PMC URLs only when all raw fetchers return non-article HTML
 
 ### Agent (`run_agent.py`)
 - **max_iterations = 200** (upstream: 90)
@@ -140,7 +141,7 @@ web:
 
 Your comprehensive research use case should work:
 
-"Comprehensive research about pneumonia in ER , fetch at least 10 up-to-date, evidence-based and reliable sources or guidelines, make it into .md file in ~/workspace folder, write 2000 words first then edit for more contents."
+"Comprehensive research about pneumonia in ER , fetch at least 10 up-to-date, evidence-based and reliable sources or guidelines, make it into .md file in ~/workspace folder."
 
 **Expected Output:**
 - ✅ ~7000 words
