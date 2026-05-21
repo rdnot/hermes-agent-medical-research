@@ -1057,6 +1057,26 @@ def _is_recaptcha_challenge(content_bytes: bytes) -> bool:
     return "checking your browser" in raw and "recaptcha" in raw
 
 
+def _has_pubmed_article_content(content_bytes: bytes) -> bool:
+    """Return True when PubMed/PMC HTML contains the real article body, not a shell/challenge."""
+    try:
+        raw = content_bytes.decode("utf-8", errors="replace").lower()
+    except Exception:
+        return False
+    if _is_recaptcha_challenge(content_bytes):
+        return False
+    # PMC full article pages consistently include these server-rendered article markers.
+    # Title-only/shell pages can still return HTTP 200, so status alone is not enough.
+    return any(marker in raw for marker in [
+        'id="main-content"',
+        'id="article-container"',
+        'pmc-article-section',
+        'article-body',
+        'class="abstract"',
+        'section class="abstract"',
+    ])
+
+
 async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str]:
     """
     Fetch URL bytes with tiered fallback strategy:
@@ -1123,36 +1143,63 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
             if is_pubmed:
 
                 async def _pubmed_recaptcha_action(page):
-                    """Wait for PubMed/PMC reCAPTCHA cookie + redirect inside Scrapling."""
+                    """Wait for PubMed/PMC reCAPTCHA to yield real article HTML inside Scrapling."""
                     try:
+                        async def _page_has_article() -> bool:
+                            page_html = await page.content()
+                            return _has_pubmed_article_content(page_html.encode("utf-8", errors="replace"))
+
+                        if await _page_has_article():
+                            logger.debug("PubMed: article content already present after navigation")
+                            return
+
                         page_html = await page.content()
                         if not _is_recaptcha_challenge(page_html.encode("utf-8", errors="replace")):
-                            return  # Not a reCAPTCHA page — nothing to do
-                        logger.info("PubMed reCAPTCHA challenge detected — waiting for cookie + redirect")
-                        # Poll for the reCAPTCHA success cookie (up to 15s)
+                            # Not the known challenge, but also not article content. Give JS a short
+                            # chance to render before Scrapling captures a title-only shell.
+                            logger.debug("PubMed: no reCAPTCHA marker but article content absent; waiting for body markers")
+                            for _ in range(50):
+                                if await _page_has_article():
+                                    return
+                                await page.wait_for_timeout(100)
+                            return
+
+                        logger.info("PubMed reCAPTCHA challenge detected — waiting for article content")
+                        # Poll for the success cookie OR for real article markers. Some NCBI/PMC
+                        # variants do not expose the historical recaptcha-* cookie names to Playwright,
+                        # so DOM/article-content detection is the reliable success condition.
                         _recaptcha_cookies = {
                             "recaptcha-ca-e", "recaptcha-fastly-e",
                             "recaptcha-cf-e", "recaptcha-akam-e",
                         }
-                        for _ in range(150):
+                        for _ in range(200):
+                            if await _page_has_article():
+                                logger.info("PubMed: article content appeared after reCAPTCHA wait")
+                                return
                             cookies = await page.context.cookies()
                             cookie_names = {c["name"] for c in cookies}
                             if cookie_names & _recaptcha_cookies:
-                                logger.debug("reCAPTCHA cookie detected, waiting for page reload")
-                                # Wait for location.reload(true) to fire and new page to load
+                                logger.debug("reCAPTCHA cookie detected, waiting for page reload/article markers")
                                 try:
                                     await page.wait_for_load_state("domcontentloaded", timeout=10000)
                                 except Exception:
                                     pass
-                                # Extra settle for dynamic content rendering
-                                await page.wait_for_timeout(1500)
-                                logger.info("PubMed: reCAPTCHA bypassed, page reloaded")
+                                for _ in range(30):
+                                    if await _page_has_article():
+                                        logger.info("PubMed: reCAPTCHA bypassed, article content loaded")
+                                        return
+                                    await page.wait_for_timeout(100)
+                            await page.wait_for_timeout(100)
+
+                        # Cookie/content not seen — try manual reload as last resort, then wait for
+                        # the article markers rather than returning immediately after a 200 shell.
+                        logger.debug("PubMed: reCAPTCHA cookie/content not detected, attempting page.reload()")
+                        await page.reload(wait_until="domcontentloaded", timeout=10000)
+                        for _ in range(50):
+                            if await _page_has_article():
+                                logger.info("PubMed: article content loaded after manual reload")
                                 return
                             await page.wait_for_timeout(100)
-                        # Cookie not seen in 15s — try a manual reload as last resort
-                        logger.debug("PubMed: reCAPTCHA cookie not detected, attempting page.reload()")
-                        await page.reload(wait_until="domcontentloaded")
-                        await page.wait_for_timeout(2000)
                     except Exception as rc_err:
                         logger.debug("PubMed reCAPTCHA page_action failed: %s", rc_err)
 
@@ -1211,20 +1258,25 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
                                 "solver failed, skipping to next tier"
                             )
                             break  # CF unsolvable, don't retry
-                        # Reject results still showing reCAPTCHA challenge — retry
-                        if is_pubmed and _is_recaptcha_challenge(content):
+                        # Reject PubMed/PMC title-only shells or unresolved challenge pages.
+                        # Scrapling can return HTTP 200 before the real article body exists;
+                        # accepting that poisons downstream processing with 40-word output.
+                        if is_pubmed and not _has_pubmed_article_content(content):
+                            if _is_recaptcha_challenge(content):
+                                reason = "reCAPTCHA still present"
+                            else:
+                                reason = "article content markers absent"
                             if _pubmed_attempt < _pubmed_max_attempts - 1:
                                 logger.info(
-                                    "PubMed: reCAPTCHA still present after attempt %d/%d, retrying…",
-                                    _pubmed_attempt + 1, _pubmed_max_attempts,
+                                    "PubMed: Scrapling returned %s after attempt %d/%d, retrying…",
+                                    reason, _pubmed_attempt + 1, _pubmed_max_attempts,
                                 )
                                 continue
-                            else:
-                                logger.warning(
-                                    "PubMed: reCAPTCHA still present after %d attempts, skipping to next tier",
-                                    _pubmed_max_attempts,
-                                )
-                                break
+                            logger.warning(
+                                "PubMed: Scrapling returned %s after %d attempts, skipping to next tier",
+                                reason, _pubmed_max_attempts,
+                            )
+                            break
                         content_type = resp.headers.get("content-type", "text/html") if resp.headers else "text/html"
                         headers = dict(resp.headers or {})
                         logger.debug("Scrapling fetch succeeded (status=%d)", resp.status)
@@ -1248,6 +1300,41 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
     raise Exception(f"All local fetchers failed for {url}")
 
 
+async def _fetch_jina(url: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
+    """Fetch article content via Jina Reader (free, no API key needed for r.jina.ai)."""
+    try:
+        import httpx
+        jina_url = f"https://r.jina.ai/{url}"
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            resp = await client.get(
+                jina_url,
+                timeout=timeout,
+                headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", {})
+            text = data.get("content", "")
+            title = data.get("title", "")
+        if not text:
+            return None
+        max_chars = 400000  # Match hermes max_tool_result_chars
+        if len(text) > max_chars:
+            truncated = text[:max_chars]
+            last_para_end = max(truncated.rfind('\n\n'), truncated.rfind('\r\n\r\n'))
+            if last_para_end > max_chars * 0.9:
+                text = truncated[:last_para_end] + "\n\n[...truncated...]"
+        return {
+            "url": url,
+            "title": title,
+            "content": text,
+            "raw_content": text,
+            "metadata": {"sourceURL": url, "content_type": "text/markdown", "fetcher": "jina"},
+        }
+    except Exception as e:
+        logger.debug("Jina Reader fallback failed for %s: %s", url, e)
+        return None
+
+
 async def _fetch_and_process_locally(url: str, timeout: int = 60) -> Optional[Dict[str, Any]]:
     """
     Fetch URL using tiered local fetchers and process content.
@@ -1267,6 +1354,19 @@ async def _fetch_and_process_locally(url: str, timeout: int = 60) -> Optional[Di
     except Exception as e:
         logger.debug("Local fetch failed for %s: %s", url, e)
         return None  # Signal to fall back to cloud API
+
+    # PubMed/PMC sometimes returns HTTP 200 challenge/title-only shells from every raw
+    # fetcher. Never process/cache those as 40-word "success"; use Jina Reader as a
+    # last-resort article extractor if direct fetching did not obtain real article HTML.
+    if (
+        "ncbi.nlm.nih.gov" in url.lower()
+        and "pmc" in url.lower()
+        and not _has_pubmed_article_content(content_bytes)
+    ):
+        logger.warning("PubMed/PMC raw fetch returned non-article HTML via %s; trying Jina fallback", fetcher)
+        jina_result = await _fetch_jina(url, timeout=30)
+        if jina_result is not None:
+            return jina_result
 
     content_type = headers.get("content-type", "text/html")
 
