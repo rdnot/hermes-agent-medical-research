@@ -4,7 +4,7 @@
 >
 > — **89/100** · *Claude (free tier), acting as a satisfied reviewer*
 
-**Last fork README.md update:** 2026-05-07
+**Last fork README.md update:** 2026-05-25
 
 ## Nanobot Medical Research Fork → Hermes Port Status
 
@@ -74,8 +74,9 @@ Personality
 Helpful and in-depth.
 Concise and to the point.
 Do not ask follow up questions.
-Curious and eager to learn, easy to trigger web_search tool if user asks for information.
-Always list relevant URL references at the end of response.
+Curious and eager to learn, easy to trigger web_search / web_extract tool if user asks for information.
+Always list concise relevant URL references at the end of response.
+
 ## Values
 Accuracy over speed
 User privacy and safety
@@ -93,7 +94,6 @@ Language: English
 
 - **Tell Hermes to** : set MEMORY.md to
 ```
-## Current Long-term Memory
 ## User Information
 * User is an ER doctor who uses AI tools for in-depth medical research, improving patient care.
 * User's work context involves processing medical literature, guidelines, and analysing time-critical evidence-based acute care of ER patients.
@@ -105,7 +105,6 @@ Language: English
 
 ## Important Notes
 * NEVER fabricate or invent search results. If information is not current, say so honestly.
-* Always list relevant URL references at the end of response.
 ```
 
 - **Tell Hermes to** : set web.search_backend to tavily (or brave-free or searxng), and set the api key in env. For free local search → set web.search_backend to searxng and set SEARXNG_URL in env, or tell Hermes to install and set up local searxng)
@@ -114,11 +113,8 @@ Language: English
 ```yaml
 web:
   backend: tavily              # shared fallback for both search and extract
-  search_backend: tavily       # specify search provider (tavily | brave-free | searxng | exa | parallel | firecrawl)
-  # search_backend: searxng    # (optional) override search to use free self-hosted searxng (needs SEARXNG_URL in .env)
+  search_backend: tavily       # specify search provider (tavily | brave-free | searxng | exa | parallel | firecrawl) 
   extract_backend: local       # fork: free local extraction (curl_cffi → scrapling → httpx → fallback to web.backend)
-  # extract_backend: firecrawl # use Firecrawl directly (no local attempt)
-  # extract_backend: tavily    # use Tavily directly
 ```
 
 **Backend resolution logic:**
@@ -131,7 +127,7 @@ web:
 | `searxng` | Error (search-only, cannot extract) | — |
 | `""` (empty) | Falls to `web.backend`, then auto-detect from env | Error |
 
-- **Tell Hermes to** : install required dependencies (curl_cffi, scrapling, scrapling[fetchers], trafilatura, PyMuPDF(optional)) then install the browser dependencies with `scrapling install`)
+- **Tell Hermes to** : install required dependencies (curl_cffi, scrapling, scrapling[fetchers], trafilatura, PyMuPDF (PyMuPDF is optional)) then install the browser dependencies with `scrapling install`)
 
 - **Restart Hermes agent** : `/exit` then `hermes chat` (in CLI), `/restart` (in messaging app)
 
@@ -148,7 +144,7 @@ Your comprehensive research use case should work:
 - ✅ ~50KB size
 - ✅ ~28 tool calls
 - ✅ Structured markdown
-- ✅ Tool summary displayed
+- ✅ Tool summary displayed (in CLI)
 
 ---
 
