@@ -63,7 +63,7 @@
 
 ## What You Can Do Now (setting up for medical research)
 
-- **Tell Hermes to** : pull this fork into local Hermes agent ( https://github.com/rdnot/hermes-agent-medical-research/ )
+- **Tell Hermes to** : pull this fork into your Hermes agent local repo ( https://github.com/rdnot/hermes-agent-medical-research/ )
 
 - **Restart Hermes agent** : `/exit` then `hermes chat` (in CLI), `/restart` (in messaging app)
 
