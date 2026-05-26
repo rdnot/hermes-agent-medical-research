@@ -63,6 +63,8 @@
 
 ## What You Can Do Now (setting up for medical research)
 
+- **Tell Hermes to** : do a security analysis of this fork codes ( https://github.com/rdnot/hermes-agent-medical-research/ )
+
 - **Tell Hermes to** : pull this fork into your Hermes agent local repo ( https://github.com/rdnot/hermes-agent-medical-research/ )
 
 - **Restart Hermes agent** : `/exit` then `hermes chat` (in CLI), `/restart` (in messaging app)
@@ -108,7 +110,7 @@ Language: English
 ```
 
 - **Tell Hermes to** : set web.search_backend to tavily (or brave-free or searxng), and set the api key in env. For free local search → set web.search_backend to searxng and set SEARXNG_URL in env, or tell Hermes to install and set up local searxng)
-- **Tell Hermes to** : set web.extract_backend to local (fork: free extraction via curl_cffi → scrapling → httpx, with fallback to web.backend on rare total failure)
+- **Tell Hermes to** : set web.extract_backend to local in config.yaml (fork: free extraction via curl_cffi → scrapling → httpx, with fallback to web.backend on rare total failure)
   [or set in config yourself]
 ```yaml
 web:
