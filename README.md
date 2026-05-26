@@ -133,13 +133,13 @@ web:
 
 - **Restart Hermes agent** : `/exit` then `hermes chat` (in CLI), `/restart` (in messaging app)
 
-- **Tell Hermes to** : do 1 web search then 1 local web extraction about pubmed pneumonia article then summarize
+- **Tell Hermes to** : do 1 web search then 1 local web extraction about pubmed article : Pneumonia—Overview from Encyclopedia of Respiratory Medicine then summarize and report completeness / word count (should has ~7,800 words)
 
 ### ✅ Ready for Testing
 
 Your comprehensive research use case should work:
 
-"Comprehensive research about pneumonia in ER , fetch at least 10 up-to-date, evidence-based and reliable sources or guidelines, make it into .md file in ~/workspace folder."
+"Comprehensive research about pneumonia in ER , fetch at least 10 up-to-date, evidence-based and reliable sources or guidelines, make it into .md file in your workspace folder."
 
 **Expected Output:**
 - ✅ ~7000 words
