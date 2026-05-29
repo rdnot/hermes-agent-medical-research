@@ -28,7 +28,7 @@
 | **ReadFileTool limits** | ✅ | ❌ Config | `file_read_max_chars` |
 | **_CHAT_RETRY_DELAYS** | ✅ 5 attempts | ❌ SKIP | Hermes: 3 retries, jittered |
 
-## Fork Changes (22 customizations)
+## Fork Changes (21 customizations)
 
 ### Web Tools (`tools/web_tools.py`)
 - **Tiered Local Fetcher**: curl_cffi (Chrome TLS) → Scrapling (JS/Cloudflare) → httpx fallback
@@ -36,7 +36,6 @@
 - **Per-capability backend split**: Fork adds `local` as extract backend with smart fallback
 - **SearXNG**: Upstream native support for `web.search_backend: searxng` (set `SEARXNG_URL` in env)
 - **PDF & HTML**: PyMuPDF for PDFs, trafilatura for HTML-to-text
-- **Reddit**: `.json` auto-conversion, structured comment/thread parsing
 - **LLM summarization disabled** for 5K–500K range (returns raw text)
 - **MAX_OUTPUT_SIZE = 10,000** (upstream: 5,000)
 - **`web_extract` max_result_size_chars = 500,000** (upstream: 100,000)

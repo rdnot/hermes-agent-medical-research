@@ -778,150 +778,6 @@ def _get_extract_backend() -> str:
 # Tries local fetchers before falling back to cloud APIs.
 # Order: curl_cffi (fast, no browser) → Scrapling (JS/Cloudflare) → httpx (last resort)
 
-def _convert_reddit_url(url: str) -> str:
-    """Convert Reddit URLs to .json API for structured data."""
-    from urllib.parse import urlparse, urlunparse
-    parsed = urlparse(url)
-    if "reddit.com" in parsed.netloc.lower() and not parsed.path.endswith(".json"):
-        new_path = parsed.path.rstrip('/') + '/.json'
-        url = urlunparse(parsed._replace(path=new_path))
-        logger.debug("Converted Reddit URL to JSON API: %s", url)
-    return url
-
-
-def _parse_reddit_json(raw_json: str, original_url: str = "") -> Optional[Dict[str, Any]]:
-    """
-    Parse Reddit JSON API response into structured post + comments.
-
-    Reddit .json returns [post_listing, comment_listing] with nested replies.
-    Converts to a flat readable format with indentation for depth.
-
-    Returns dict with url, title, content (formatted text), or None if not valid Reddit JSON.
-    """
-    try:
-        data = json.loads(raw_json)
-    except (json.JSONDecodeError, ValueError):
-        return None
-
-    # Reddit .json returns a 2-element list: [post_listing, comment_listing]
-    if not isinstance(data, list) or len(data) < 2:
-        return None
-    if not isinstance(data[0], dict) or data[0].get("kind") != "Listing":
-        return None
-
-    try:
-        post_data = data[0]["data"]["children"][0]["data"]
-    except (KeyError, IndexError, TypeError):
-        return None
-
-    parts: List[str] = []
-
-    # Post header
-    subreddit = post_data.get("subreddit", "")
-    author = post_data.get("author", "")
-    score = post_data.get("score", 0)
-    num_comments = post_data.get("num_comments", 0)
-    parts.append(f"[POST] r/{subreddit} | u/{author} | score:{score} | {num_comments} comments")
-
-    title = post_data.get("title", "")
-    if title:
-        parts.append(f"Title: {title}")
-
-    # Post body (selftext)
-    selftext = post_data.get("selftext", "")
-    if selftext:
-        # Convert markdown links to plain text for readability
-        body = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'\1 (\2)', selftext)
-        parts.append(f"Body: {body}")
-
-    # External link (image/link posts)
-    if not post_data.get("is_self") and post_data.get("url_overridden_by_dest"):
-        parts.append(f"Link: {post_data['url_overridden_by_dest']}")
-
-    # Gallery images
-    media_metadata = post_data.get("media_metadata")
-    if media_metadata:
-        for media_id, media in media_metadata.items():
-            if isinstance(media, dict) and media.get("status") == "valid":
-                parts.append(f"Image: https://i.redd.it/{media_id}.png")
-
-    # Flair
-    link_flair = post_data.get("link_flair_text", "")
-    if link_flair:
-        parts.append(f"Flair: {link_flair}")
-
-    parts.append("---")
-
-    # Walk comments recursively
-    if len(data) > 1 and isinstance(data[1], dict):
-        comment_children = data[1].get("data", {}).get("children", [])
-
-        def _walk_comments(children: list, depth: int = 0) -> None:
-            for child in children:
-                if not isinstance(child, dict):
-                    continue
-                kind = child.get("kind", "")
-
-                # "more" — collapsed/remaining comments stub
-                if kind == "more":
-                    count = child.get("data", {}).get("count", 0)
-                    if count > 0:
-                        indent = "  " * depth
-                        parts.append(f"{indent}[+{count} more replies]")
-                    continue
-
-                if kind != "t1":
-                    continue
-
-                d = child.get("data", {})
-                body = d.get("body", "")
-                author = d.get("author", "?")
-                score = d.get("score", 0)
-
-                # Skip deleted/removed
-                if body in ("[deleted]", "[removed]", ""):
-                    replies = d.get("replies")
-                    if isinstance(replies, dict):
-                        reply_children = replies.get("data", {}).get("children", [])
-                        _walk_comments(reply_children, depth)
-                    continue
-
-                indent = "  " * depth
-                # Truncate very long comments
-                if len(body) > 500:
-                    body = body[:500] + "..."
-                parts.append(f"{indent}[u/{author} | score:{score}] {body}")
-
-                # Recurse into replies
-                replies = d.get("replies")
-                if isinstance(replies, dict):
-                    reply_children = replies.get("data", {}).get("children", [])
-                    _walk_comments(reply_children, depth + 1)
-
-        try:
-            children = data[1]["data"]["children"]
-            _walk_comments(children)
-        except (KeyError, TypeError):
-            pass
-
-    formatted = "\n\n".join(parts)
-
-    return {
-        "url": original_url,
-        "title": title,
-        "content": formatted,
-        "raw_content": formatted,
-        "metadata": {
-            "sourceURL": original_url,
-            "content_type": "reddit_json",
-            "subreddit": subreddit,
-            "author": author,
-            "score": score,
-            "num_comments": num_comments,
-        },
-    }
-
-
 def _extract_pdf_text(pdf_data: bytes) -> str:
     """Extract text from PDF using PyMuPDF."""
     if not HAS_PYMUPDF:
@@ -1092,12 +948,6 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
     import httpx
 
     is_reddit = "reddit.com" in url.lower()
-
-    # Convert Reddit URLs to .json API — scrapling fetches the JSON endpoint directly
-    # curl_cffi tier is skipped for Reddit entirely (see below)
-    if is_reddit:
-        url = _convert_reddit_url(url)
-        logger.debug("Reddit: fetching JSON API endpoint: %s", url)
 
     # PubMed/PMC blocks curl_cffi and httpx with Cloudflare — skip curl_cffi, go straight to Scrapling
     is_pubmed = "pubmed.ncbi.nlm.nih.gov" in url.lower() or "pmc.ncbi.nlm.nih.gov" in url.lower()
@@ -1346,9 +1196,6 @@ async def _fetch_and_process_locally(url: str, timeout: int = 60) -> Optional[Di
     Raises:
         Exception if fetch succeeds but processing fails.
     """
-    # Track if this is a Reddit URL (will be converted to .json in _fetch_raw)
-    is_reddit = "reddit.com" in url.lower()
-
     try:
         content_bytes, headers, status_code, fetcher = await _fetch_raw(url, timeout)
     except Exception as e:
@@ -1370,28 +1217,6 @@ async def _fetch_and_process_locally(url: str, timeout: int = 60) -> Optional[Di
 
     content_type = headers.get("content-type", "text/html")
 
-    # ── Reddit JSON API: parse structured post + comments ──────────────────
-    if is_reddit:
-        try:
-            raw_text = content_bytes.decode("utf-8", errors="replace")
-
-            # Scrapling may wrap JSON in <html><body><p>[{...}]</p></body></html>
-            # Extract the actual JSON from the wrapper if present
-            if raw_text.lstrip().startswith("<"):
-                p_match = re.search(r'<p[^>]*>([\s\S]*?)</p>', raw_text, re.IGNORECASE)
-                if p_match:
-                    raw_text = html.unescape(p_match.group(1).strip())
-                    logger.debug("Unwrapped Reddit JSON from HTML <p> tag")
-
-            reddit_result = _parse_reddit_json(raw_text, original_url=url)
-            if reddit_result is not None:
-                logger.info("Reddit JSON parsed successfully: %s", url)
-                return reddit_result
-            else:
-                logger.debug("Reddit JSON parse returned None, falling through to HTML extraction")
-        except Exception as e:
-            logger.debug("Reddit JSON parse failed for %s: %s", url, e)
-    
     # Handle PDF
     if "application/pdf" in content_type or url.lower().endswith(".pdf"):
         try:
