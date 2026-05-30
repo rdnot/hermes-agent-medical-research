@@ -46,6 +46,7 @@ ACP_REGISTRY_MANIFEST = REPO_ROOT / "acp_registry" / "agent.json"
 # Auto-extracted from noreply emails + manual overrides
 AUTHOR_MAP = {
     "drpelagik@gmail.com": "SeaXen",
+    "lengr@users.noreply.github.com": "LengR",
     "metalclaudbot@gmail.com": "HashClawAI",
     "tonybear55665566@gmail.com": "TonyPepeBear",
     "kaspersniels@gmail.com": "nielskaspers",
@@ -651,6 +652,7 @@ AUTHOR_MAP = {
     "alexazzjjtt@163.com": "alexzhu0",
     "pub_forgreatagent@antgroup.com": "AntAISecurityLab",
     "252620095+briandevans@users.noreply.github.com": "briandevans",
+    "incharge.automation@gmail.com": "inchargeautomation-lab",
     "danielrpike9@gmail.com": "Bartok9",
     "96944678+ymylive@users.noreply.github.com": "sweetcornna",
     "skozyuk@cruxexperts.com": "CruxExperts",
@@ -1205,6 +1207,7 @@ AUTHOR_MAP = {
     "86501179+1RB@users.noreply.github.com": "1RB",  # PR #25462 salvage (discord forwarded messages)
     "44045943+ayushere@users.noreply.github.com": "ayushere",  # PR #25342 salvage (memory teardown leak)
     "15791290+domtriola@users.noreply.github.com": "domtriola",  # PR #25424 salvage (docs tirith link)
+    "tuancookiez@gmail.com": "tuancookiez-hub",  # PR #34865 salvage (LSP Windows .cmd shim spawn, #34864)
     "284216128+ephron-ren@users.noreply.github.com": "ephron-ren",  # PR #25358 salvage (MiMo reasoning echo-back)
     "96843562+freqyfreqy@users.noreply.github.com": "freqyfreqy",  # PR #25423 salvage (docs LSP worktree -> repo)
     "54306477+fu576@users.noreply.github.com": "fu576",  # PR #25369 salvage (api_mode not inherited cross-provider)
