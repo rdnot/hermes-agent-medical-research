@@ -12,7 +12,6 @@
 |---------|---------|--------|------|
 | **Tiered Web Fetcher** | ✅ curl_cffi + Scrapling | ✅ Fork | P0 |
 | **PDF Extraction** | ✅ PyMuPDF | ✅ Fork | P0 |
-| **Reddit JSON API** | ✅ Auto-convert | ✅ Fork | P0 |
 | **Force-Final Threshold** | ✅ max_iter - 2 | ✅ Fork | P0 |
 | **Tool Summary Display** | ✅ CLI only | ✅ Fork | P0 |
 | **Max Iterations (200)** | ✅ Default | ✅ Fork | P0 |
@@ -28,7 +27,7 @@
 | **ReadFileTool limits** | ✅ | ❌ Config | `file_read_max_chars` |
 | **_CHAT_RETRY_DELAYS** | ✅ 5 attempts | ❌ SKIP | Hermes: 3 retries, jittered |
 
-## Fork Changes (21 customizations)
+## Fork Changes (20 customizations)
 
 ### Web Tools (`tools/web_tools.py`)
 - **Tiered Local Fetcher**: curl_cffi (Chrome TLS) → Scrapling (JS/Cloudflare) → httpx fallback
