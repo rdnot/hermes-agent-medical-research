@@ -1,154 +1,3 @@
-# Hermes Agent Medical Research Fork
-
-> *"Turns Hermes into something I'd actually want running during a busy shift — fetches real PubMed articles, PDF guidelines, and full journal articles without getting blocked or cutting the answer short. Give it a complex clinical question and it pulls 10+ sources, reads them properly, and writes a structured answer that respects the depth the topic deserves. For evidence-based acute care research at the end of a long night, this does what a good medical library tool should."*
->
-> — **89/100** · *Claude (free tier), acting as a satisfied reviewer*
-
-**Last fork README.md update:** 2026-05-25
-
-## Nanobot Medical Research Fork → Hermes Port Status
-
-| Feature | Nanobot | Status | Note |
-|---------|---------|--------|------|
-| **Tiered Web Fetcher** | ✅ curl_cffi + Scrapling | ✅ Fork | P0 |
-| **PDF Extraction** | ✅ PyMuPDF | ✅ Fork | P0 |
-| **Reddit JSON API** | ✅ Auto-convert | ✅ Fork | P0 |
-| **Force-Final Threshold** | ✅ max_iter - 2 | ✅ Fork | P0 |
-| **Tool Summary Display** | ✅ CLI only | ✅ Fork | P0 |
-| **Max Iterations (200)** | ✅ Default | ✅ Fork | P0 |
-| **max_tool_result_chars (400K)** | ✅ | ✅ Fork | P0 |
-| **SearXNG Search** | ✅ Hardcoded URL | ✅ Upstream | `web.search_backend: searxng` |
-| **Disabled LLM Summarization 5K-500K** | ✅ | ✅ Fork | Returns raw text |
-| **MAX_OUTPUT_SIZE (10K)** | ✅ | ✅ Fork | Upstream: 5K |
-| **web_extract threshold (500K)** | ✅ | ✅ Fork | Upstream: 100K |
-| **WhatsApp Channel** | ✅ | ❌ Native | Hermes handles natively |
-| **Commands (/s, /c, /rerun)** | ✅ | ❌ SKIP | Hermes has prefix matching |
-| **ExecTool timeout (90s)** | ✅ | ❌ Config | `code_execution.timeout` |
-| **context_window_tokens (200K)** | ✅ | ❌ Config | `model.context_length` |
-| **ReadFileTool limits** | ✅ | ❌ Config | `file_read_max_chars` |
-| **_CHAT_RETRY_DELAYS** | ✅ 5 attempts | ❌ SKIP | Hermes: 3 retries, jittered |
-
-## Fork Changes (21 customizations)
-
-### Web Tools (`tools/web_tools.py`)
-- **Tiered Local Fetcher**: curl_cffi (Chrome TLS) → Scrapling (JS/Cloudflare) → httpx fallback
-- **`web.extract_backend: local`**: Bypass cloud APIs entirely for extraction
-- **Per-capability backend split**: Fork adds `local` as extract backend with smart fallback
-- **SearXNG**: Upstream native support for `web.search_backend: searxng` (set `SEARXNG_URL` in env)
-- **PDF & HTML**: PyMuPDF for PDFs, trafilatura for HTML-to-text
-- **LLM summarization disabled** for 5K–500K range (returns raw text)
-- **MAX_OUTPUT_SIZE = 10,000** (upstream: 5,000)
-- **`web_extract` max_result_size_chars = 500,000** (upstream: 100,000)
-- **Auto-fallback**: Local extract fails → falls back to `web.backend`, skips search-only backends
-- **PubMed/PMC hardening**: reCAPTCHA retry + article-content validator (rejects HTTP-200 title-only shells); Jina Reader fallback for PMC URLs only when all raw fetchers return non-article HTML
-
-### Agent (`run_agent.py`)
-- **max_iterations = 200** (upstream: 90)
-- **Force-final threshold** at N-2 (prevents infinite tool loops)
-- **Tool summary tracking** + `result['tool_summary']` key (CLI streaming display)
-
-### Budget (`tools/budget_config.py`)
-- **DEFAULT_RESULT_SIZE_CHARS = 400,000** (upstream: 100,000)
-- **DEFAULT_TURN_BUDGET_CHARS = 500,000** (upstream: 200,000)
-
-### CLI & Gateway
-- **CLI/Gateway defaults** aligned to 200 iterations
-- **Tool summary in streaming mode** (printed after stream box closes)
-
-### LINE Messenger (`gateway/config.py`, `plugins/platforms/line/adapter.py`)
-- **`Platform.LINE` static enum member** (upstream LINE is dynamic plugin only)
-- **`reply_only_mention` flag** via `LINE_REPLY_ONLY_MENTION` env var (groups skip non-mentions)
-- **Mention check** in `_handle_message_event` (bot userId match in group/room)
-
-## What You Can Do Now (setting up for medical research)
-
-- **Tell Hermes to** : do a security analysis of this fork codes ( https://github.com/rdnot/hermes-agent-medical-research/ )
-
-- **Tell Hermes to** : pull this fork into your Hermes agent local repo ( https://github.com/rdnot/hermes-agent-medical-research/ )
-
-- **Restart Hermes agent** : `/exit` then `hermes chat` (in CLI), `/restart` (in messaging app)
-
-- **Tell Hermes to** : set SOUL.md to
-```
-I am Hermes agent, a helpful AI assistant for ER doctor.
-Personality
-Helpful and in-depth.
-Concise and to the point.
-Do not ask follow up questions.
-Curious and eager to learn, easy to trigger web_search / web_extract tool if user asks for information.
-Always list concise relevant URL references at the end of response.
-
-## Values
-Accuracy over speed
-User privacy and safety
-Transparency in actions
-```
-
-- **Tell Hermes to** : set USER.md to
-```
-User Profile
-Role: Emergency Room (ER) Doctor
-Communication style: Medical assistant style
-Timezone: ***
-Language: English
-```
-
-- **Tell Hermes to** : set MEMORY.md to
-```
-## User Information
-* User is an ER doctor who uses AI tools for in-depth medical research, improving patient care.
-* User's work context involves processing medical literature, guidelines, and analysing time-critical evidence-based acute care of ER patients.
-
-## Preferences
-* User has a strong preference for verified and latest up-to-date sources.
-* User is knowledgeable about current medical guidelines and will correct inaccuracies when found.
-* **CRITICAL: For medical knowledge summaries, user requires comprehensive, structured format with practical ER clinical points.**
-
-## Important Notes
-* NEVER fabricate or invent search results. If information is not current, say so honestly.
-```
-
-- **Tell Hermes to** : set web.search_backend to tavily (or brave-free or searxng), and set the api key in env. For free local search → set web.search_backend to searxng and set SEARXNG_URL in env, or tell Hermes to install and set up local searxng)
-- **Tell Hermes to** : set web.extract_backend to local in config.yaml (fork: free extraction via curl_cffi → scrapling → httpx, with fallback to web.backend on rare total failure)
-  [or set in config yourself]
-```yaml
-web:
-  backend: tavily              # shared fallback for both search and extract
-  search_backend: tavily       # specify search provider (tavily | brave-free | searxng | exa | parallel | firecrawl) 
-  extract_backend: local       # fork: free local extraction (curl_cffi → scrapling → httpx → fallback to web.backend)
-```
-
-**Backend resolution logic:**
-
-| Config `extract_backend` | Behavior | On failure |
-|---|---|---|
-| `local` | curl_cffi → scrapling → httpx | Falls back to `web.backend` (if non-empty), else error |
-| `firecrawl` | Firecrawl API directly (no local attempt) | Error |
-| `tavily` / `exa` / `parallel` | That API directly | Error |
-| `searxng` | Error (search-only, cannot extract) | — |
-| `""` (empty) | Falls to `web.backend`, then auto-detect from env | Error |
-
-- **Tell Hermes to** : install required dependencies (curl_cffi, scrapling, scrapling[fetchers], trafilatura, PyMuPDF (PyMuPDF is optional)) then install the browser dependencies with `scrapling install`)
-
-- **Restart Hermes agent** : `/exit` then `hermes chat` (in CLI), `/restart` (in messaging app)
-
-- **Tell Hermes to** : do 1 web search then 1 local web extraction about pubmed article : Pneumonia—Overview from Encyclopedia of Respiratory Medicine then summarize and report completeness / word count (should has ~7,800 words)
-
-### ✅ Ready for Testing
-
-Your comprehensive research use case should work:
-
-"Comprehensive research about pneumonia in ER , fetch at least 10 up-to-date, evidence-based and reliable sources or guidelines, make it into .md file in your workspace folder."
-
-**Expected Output:**
-- ✅ ~7000 words
-- ✅ ~50KB size
-- ✅ ~28 tool calls
-- ✅ Structured markdown
-- ✅ Tool summary displayed (in CLI)
-
----
-
 <p align="center">
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>
@@ -187,9 +36,9 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), [Open
 curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
 ```
 
-### Windows (native, PowerShell) — Early Beta
+### Windows (native, PowerShell)
 
-> **Heads up:** Native Windows support is **early beta**. It installs and runs, but hasn't been road-tested as broadly as our Linux/macOS/WSL2 paths. Please [file issues](https://github.com/NousResearch/hermes-agent/issues) when you hit rough edges. For the most battle-tested Windows setup today, run the Linux/macOS one-liner above inside **WSL2**.
+> **Heads up:** Native Windows runs Hermes without WSL — CLI, gateway, TUI, and tools all work natively. If you'd rather use WSL2, the Linux/macOS one-liner above works there too. Found a bug? Please [file issues](https://github.com/NousResearch/hermes-agent/issues).
 
 Run this in PowerShell:
 
@@ -197,13 +46,13 @@ Run this in PowerShell:
 iex (irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1)
 ```
 
-The installer handles everything: uv, Python 3.11, Node.js, ripgrep, ffmpeg, **and a portable Git Bash** (MinGit, unpacked to `%LOCALAPPDATA%\hermes\git` — no admin required, completely isolated from any system Git install).  Hermes uses this bundled Git Bash to run shell commands.
+The installer handles everything: uv, Python 3.11, Node.js, ripgrep, ffmpeg, **and a portable Git Bash** (MinGit, unpacked to `%LOCALAPPDATA%\hermes\git` — no admin required, completely isolated from any system Git install). Hermes uses this bundled Git Bash to run shell commands.
 
-If you already have Git installed, the installer detects it and uses that instead.  Otherwise a ~45MB MinGit download is all you need — it won't touch or interfere with any system Git.
+If you already have Git installed, the installer detects it and uses that instead. Otherwise a ~45MB MinGit download is all you need — it won't touch or interfere with any system Git.
 
 > **Android / Termux:** The tested manual path is documented in the [Termux guide](https://hermes-agent.nousresearch.com/docs/getting-started/termux). On Termux, Hermes installs a curated `.[termux]` extra because the full `.[all]` extra currently pulls Android-incompatible voice dependencies.
 >
-> **Windows:** Native Windows is supported as an **early beta** — the PowerShell one-liner above installs everything, but expect rough edges and please file issues when you hit them. If you'd rather use WSL2 (our most battle-tested Windows path), the Linux command works there too. Native Windows install lives under `%LOCALAPPDATA%\hermes`; WSL2 installs under `~/.hermes` as on Linux.  The only Hermes feature that currently needs WSL2 specifically is the browser-based dashboard chat pane (it uses a POSIX PTY — classic CLI and gateway both run natively).
+> **Windows:** Native Windows is fully supported — the PowerShell one-liner above installs everything. If you'd rather use WSL2, the Linux command works there too. Native Windows install lives under `%LOCALAPPDATA%\hermes`; WSL2 installs under `~/.hermes` as on Linux.  The only Hermes feature that currently needs WSL2 specifically is the browser-based dashboard chat pane (it uses a POSIX PTY — classic CLI and gateway both run natively).
 
 After installation:
 
@@ -255,17 +104,17 @@ You can still bring your own keys per-tool whenever you want — the gateway is 
 
 Hermes has two entry points: start the terminal UI with `hermes`, or run the gateway and talk to it from Telegram, Discord, Slack, WhatsApp, Signal, or Email. Once you're in a conversation, many slash commands are shared across both interfaces.
 
-| Action | CLI | Messaging platforms |
-|---------|-----|---------------------|
-| Start chatting | `hermes` | Run `hermes gateway setup` + `hermes gateway start`, then send the bot a message |
-| Start fresh conversation | `/new` or `/reset` | `/new` or `/reset` |
-| Change model | `/model [provider:model]` | `/model [provider:model]` |
-| Set a personality | `/personality [name]` | `/personality [name]` |
-| Retry or undo the last turn | `/retry`, `/undo` | `/retry`, `/undo` |
-| Compress context / check usage | `/compress`, `/usage`, `/insights [--days N]` | `/compress`, `/usage`, `/insights [days]` |
-| Browse skills | `/skills` or `/<skill-name>` | `/<skill-name>` |
-| Interrupt current work | `Ctrl+C` or send a new message | `/stop` or send a new message |
-| Platform-specific status | `/platforms` | `/status`, `/sethome` |
+| Action                         | CLI                                           | Messaging platforms                                                              |
+| ------------------------------ | --------------------------------------------- | -------------------------------------------------------------------------------- |
+| Start chatting                 | `hermes`                                      | Run `hermes gateway setup` + `hermes gateway start`, then send the bot a message |
+| Start fresh conversation       | `/new` or `/reset`                            | `/new` or `/reset`                                                               |
+| Change model                   | `/model [provider:model]`                     | `/model [provider:model]`                                                        |
+| Set a personality              | `/personality [name]`                         | `/personality [name]`                                                            |
+| Retry or undo the last turn    | `/retry`, `/undo`                             | `/retry`, `/undo`                                                                |
+| Compress context / check usage | `/compress`, `/usage`, `/insights [--days N]` | `/compress`, `/usage`, `/insights [days]`                                        |
+| Browse skills                  | `/skills` or `/<skill-name>`                  | `/<skill-name>`                                                                  |
+| Interrupt current work         | `Ctrl+C` or send a new message                | `/stop` or send a new message                                                    |
+| Platform-specific status       | `/platforms`                                  | `/status`, `/sethome`                                                            |
 
 For the full command lists, see the [CLI guide](https://hermes-agent.nousresearch.com/docs/user-guide/cli) and the [Messaging Gateway guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging).
 
@@ -275,24 +124,23 @@ For the full command lists, see the [CLI guide](https://hermes-agent.nousresearc
 
 All documentation lives at **[hermes-agent.nousresearch.com/docs](https://hermes-agent.nousresearch.com/docs/)**:
 
-| Section | What's Covered |
-|---------|---------------|
-| [Quickstart](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) | Install → setup → first conversation in 2 minutes |
-| [CLI Usage](https://hermes-agent.nousresearch.com/docs/user-guide/cli) | Commands, keybindings, personalities, sessions |
-| [Configuration](https://hermes-agent.nousresearch.com/docs/user-guide/configuration) | Config file, providers, models, all options |
-| [Messaging Gateway](https://hermes-agent.nousresearch.com/docs/user-guide/messaging) | Telegram, Discord, Slack, WhatsApp, Signal, Home Assistant |
-| [Security](https://hermes-agent.nousresearch.com/docs/user-guide/security) | Command approval, DM pairing, container isolation |
-| [Tools & Toolsets](https://hermes-agent.nousresearch.com/docs/user-guide/features/tools) | 40+ tools, toolset system, terminal backends |
-| [Skills System](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills) | Procedural memory, Skills Hub, creating skills |
-| [Memory](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory) | Persistent memory, user profiles, best practices |
-| [MCP Integration](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp) | Connect any MCP server for extended capabilities |
-| [Cron Scheduling](https://hermes-agent.nousresearch.com/docs/user-guide/features/cron) | Scheduled tasks with platform delivery |
-| [Context Files](https://hermes-agent.nousresearch.com/docs/user-guide/features/context-files) | Project context that shapes every conversation |
-| [Architecture](https://hermes-agent.nousresearch.com/docs/developer-guide/architecture) | Project structure, agent loop, key classes |
-| [Contributing](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing) | Development setup, PR process, code style |
-| [CLI Reference](https://hermes-agent.nousresearch.com/docs/reference/cli-commands) | All commands and flags |
-| [Environment Variables](https://hermes-agent.nousresearch.com/docs/reference/environment-variables) | Complete env var reference |
-| [Web Search](https://hermes-agent.nousresearch.com/docs/user-guide/features/web-search) | SearXNG, Firecrawl, Tavily, Exa — per-capability config |
+| Section                                                                                             | What's Covered                                             |
+| --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| [Quickstart](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart)                 | Install → setup → first conversation in 2 minutes          |
+| [CLI Usage](https://hermes-agent.nousresearch.com/docs/user-guide/cli)                              | Commands, keybindings, personalities, sessions             |
+| [Configuration](https://hermes-agent.nousresearch.com/docs/user-guide/configuration)                | Config file, providers, models, all options                |
+| [Messaging Gateway](https://hermes-agent.nousresearch.com/docs/user-guide/messaging)                | Telegram, Discord, Slack, WhatsApp, Signal, Home Assistant |
+| [Security](https://hermes-agent.nousresearch.com/docs/user-guide/security)                          | Command approval, DM pairing, container isolation          |
+| [Tools & Toolsets](https://hermes-agent.nousresearch.com/docs/user-guide/features/tools)            | 40+ tools, toolset system, terminal backends               |
+| [Skills System](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills)              | Procedural memory, Skills Hub, creating skills             |
+| [Memory](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory)                     | Persistent memory, user profiles, best practices           |
+| [MCP Integration](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp)               | Connect any MCP server for extended capabilities           |
+| [Cron Scheduling](https://hermes-agent.nousresearch.com/docs/user-guide/features/cron)              | Scheduled tasks with platform delivery                     |
+| [Context Files](https://hermes-agent.nousresearch.com/docs/user-guide/features/context-files)       | Project context that shapes every conversation             |
+| [Architecture](https://hermes-agent.nousresearch.com/docs/developer-guide/architecture)             | Project structure, agent loop, key classes                 |
+| [Contributing](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing)             | Development setup, PR process, code style                  |
+| [CLI Reference](https://hermes-agent.nousresearch.com/docs/reference/cli-commands)                  | All commands and flags                                     |
+| [Environment Variables](https://hermes-agent.nousresearch.com/docs/reference/environment-variables) | Complete env var reference                                 |
 
 ---
 
@@ -312,6 +160,7 @@ hermes claw migrate --overwrite  # Overwrite existing conflicts
 ```
 
 What gets imported:
+
 - **SOUL.md** — persona file
 - **Memories** — MEMORY.md and USER.md entries
 - **Skills** — user-created skills → `~/.hermes/skills/openclaw-imports/`
