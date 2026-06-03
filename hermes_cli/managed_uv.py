@@ -111,7 +111,7 @@ def rebuild_venv(uv_bin: str, venv_dir: Path, python_version: str = "3.11") -> b
         shutil.rmtree(venv_dir, ignore_errors=True)
 
     result = subprocess.run(
-        [uv_bin, "venv", str(venv_dir), "--python", python_version],
+        [uv_bin, "venv", str(venv_dir), "--python", python_version, "--clear"],
         capture_output=True,
         text=True,
         check=False,
