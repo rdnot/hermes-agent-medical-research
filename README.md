@@ -4,7 +4,7 @@
 >
 > — **89/100** · *Claude (free tier), acting as a satisfied reviewer*
 
-**Last fork README.md update:** 2026-06-01
+**Last fork README.md update:** 2026-06-05
 
 ## Nanobot Medical Research Fork → Hermes Port Status
 
@@ -65,7 +65,7 @@
 
 - **Tell Hermes to** : pull this fork into your Hermes agent local repo ( https://github.com/rdnot/hermes-agent-medical-research/ )
 
-- **Restart Hermes agent** : `/exit` then `hermes chat` (in CLI), `/restart` (in messaging app)
+- **Restart Hermes agent** : `/exit` then `hermes --tui` (in CLI), `/restart` (in messaging app)
 
 - **Tell Hermes to** : set SOUL.md to
 ```
@@ -130,7 +130,7 @@ web:
 
 - **Tell Hermes to** : install required dependencies (curl_cffi, scrapling, scrapling[fetchers], trafilatura, PyMuPDF (PyMuPDF is optional)) then install the browser dependencies with `scrapling install`)
 
-- **Restart Hermes agent** : `/exit` then `hermes chat` (in CLI), `/restart` (in messaging app)
+- **Restart Hermes agent** : `/exit` then `hermes --tui` (in CLI), `/restart` (in messaging app)
 
 - **Tell Hermes to** : do 1 web search then 1 local web extraction about pubmed article : Pneumonia—Overview from Encyclopedia of Respiratory Medicine then summarize and report completeness / word count (should has ~7,800 words)
 
