@@ -1691,6 +1691,13 @@ async def get_action_status(name: str, lines: int = 200):
         exit_code = proc.poll()
         running = exit_code is None
         pid = proc.pid
+        if exit_code is not None:
+            try:
+                proc.wait(timeout=1)
+            except Exception:
+                pass
+            _ACTION_RESULTS[name] = {"exit_code": exit_code, "pid": pid}
+            _ACTION_PROCS.pop(name, None)
 
     return {
         "name": name,
@@ -5463,6 +5470,7 @@ async def get_session_messages(session_id: str, profile: Optional[str] = None):
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
+        sid = db.resolve_resume_session_id(sid)
         messages = db.get_messages(sid)
         return {"session_id": sid, "messages": messages}
     finally:
