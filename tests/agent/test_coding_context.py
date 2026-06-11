@@ -368,20 +368,30 @@ class TestProfiles:
         assert cc.GENERAL_PROFILE.toolset is None
         assert cc.GENERAL_PROFILE.guidance == ""
 
-    def test_skill_pruning_scoped_to_coding_posture(self, tmp_path):
-        # Coding posture hides clearly-non-coding categories; coding-adjacent
-        # ones stay visible (deny-list semantics).
+    def test_skill_demotion_gated_on_focus(self, tmp_path):
+        # Names-only demotion is opt-in via focus mode — the default (auto)
+        # and forced (on) postures leave the skill index untouched. Under
+        # focus, clearly-non-coding categories are demoted (never hidden) and
+        # coding-adjacent ones keep full entries (deny-list semantics).
         _git_init(tmp_path)
-        coding = cc.resolve_runtime_mode(platform="cli", cwd=tmp_path, config={})
-        hidden = coding.hidden_skill_categories()
-        assert "social-media" in hidden and "smart-home" in hidden
-        for kept in ("github", "devops", "software-development", "data-science"):
-            assert kept not in hidden
-        # General posture hides nothing.
-        general = cc.resolve_runtime_mode(
-            platform="telegram", cwd=tmp_path, config={}
+        for raw in ("auto", "on"):
+            mode = cc.resolve_runtime_mode(
+                platform="cli", cwd=tmp_path, config={"agent": {"coding_context": raw}}
+            )
+            assert mode.is_coding is True
+            assert mode.compact_skill_categories() == frozenset()
+        focus = cc.resolve_runtime_mode(
+            platform="cli", cwd=tmp_path,
+            config={"agent": {"coding_context": "focus"}},
         )
-        assert general.hidden_skill_categories() == frozenset()
+        assert focus.is_coding is True
+        compact = focus.compact_skill_categories()
+        assert "social-media" in compact and "smart-home" in compact
+        for kept in ("github", "devops", "software-development", "data-science"):
+            assert kept not in compact
+        # General posture demotes nothing.
+        general = cc.resolve_runtime_mode(platform="telegram", cwd=tmp_path, config={})
+        assert general.compact_skill_categories() == frozenset()
 
 
 # ── detection signals ───────────────────────────────────────────────────────

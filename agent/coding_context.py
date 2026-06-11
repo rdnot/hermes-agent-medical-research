@@ -40,9 +40,11 @@ Activation (config ``agent.coding_context``):
 
   * ``auto`` (default) — posture (brief + snapshot) on an interactive coding
     surface sitting in a code workspace (git repo or recognised project root).
-    Prompt-only; toolsets untouched.
+    Prompt-only; toolsets and the skill index untouched.
   * ``focus`` — like ``auto``, but additionally collapses the toolset to the
-    ``coding`` set + enabled MCP servers. Explicit opt-in for a lean schema.
+    ``coding`` set + enabled MCP servers and demotes non-coding skill
+    categories to names-only in the prompt's skill index (no skill is ever
+    hidden). Explicit opt-in for a lean schema.
   * ``on`` — force the posture anywhere (incl. non-workspaces). Prompt-only.
   * ``off`` — disable entirely.
 """
@@ -212,11 +214,13 @@ class ContextProfile:
     ``model_hint``   — routing preference key for smart model routing
                        (extension seam; not yet consumed by the router).
     ``memory_policy``— memory namespace/weighting hint (extension seam).
-    ``hidden_skill_categories`` — skill categories pruned from the system-prompt
-                       skill index while this posture is active. Discovery-only:
-                       nothing is disabled — ``skills_list`` still returns the
-                       full catalog and ``skill_view`` loads anything. Deny-list
-                       semantics so unknown/custom categories stay visible.
+    ``compact_skill_categories`` — skill categories DEMOTED to names-only in
+                       the system-prompt skill index under the opt-in ``focus``
+                       mode. Never hidden: every skill name stays visible
+                       (so memory-anchored recall keeps working) — only the
+                       descriptions are dropped to cut index noise. Deny-list
+                       semantics so unknown/custom categories keep full
+                       entries.
     """
 
     name: str
@@ -224,14 +228,14 @@ class ContextProfile:
     guidance: str = ""
     model_hint: Optional[str] = None
     memory_policy: str = "default"
-    hidden_skill_categories: tuple[str, ...] = ()
+    compact_skill_categories: tuple[str, ...] = ()
 
 
-# Skill categories that are clearly not part of a coding workflow. Hidden from
-# the prompt's skill index in the coding posture (deny-list — anything not
-# listed here, incl. custom user categories, stays visible). Coding-adjacent
-# categories (devops, github, mcp, data-science, diagramming, research,
-# security, …) are intentionally absent.
+# Skill categories that are clearly not part of a coding workflow. Demoted to
+# names-only in the prompt's skill index under the opt-in ``focus`` mode only
+# (deny-list — anything not listed here, incl. custom user categories, keeps
+# full entries). Coding-adjacent categories (devops, github, mcp,
+# data-science, diagramming, research, security, …) are intentionally absent.
 _NON_CODING_SKILL_CATEGORIES = (
     "apple", "communication", "cooking", "creative", "email", "finance",
     "gaming", "gifs", "health", "media", "music", "note-taking",
@@ -247,7 +251,7 @@ CODING_PROFILE = ContextProfile(
     guidance=CODING_AGENT_GUIDANCE,
     model_hint="coding",
     memory_policy="project",
-    hidden_skill_categories=_NON_CODING_SKILL_CATEGORIES,
+    compact_skill_categories=_NON_CODING_SKILL_CATEGORIES,
 )
 
 _PROFILES: dict[str, ContextProfile] = {
@@ -432,9 +436,27 @@ class RuntimeMode:
             blocks.append(workspace)
         return blocks
 
-    def hidden_skill_categories(self) -> frozenset[str]:
-        """Skill categories to prune from the prompt's skill index (may be empty)."""
-        return frozenset(self.profile.hidden_skill_categories)
+    def compact_skill_categories(self) -> frozenset[str]:
+        """Skill categories to demote to names-only in the prompt's skill index.
+
+        Gated on the opt-in ``focus`` mode, like the toolset collapse: the
+        default posture leaves the skill index untouched. Users who didn't ask
+        for a lean prompt keep full entries for every category — index changes
+        under ``auto`` proved too surprising in practice, even names-only ones
+        (a demoted description is information the model no longer weighs when
+        deciding what to load).
+
+        Demoted — never hidden — even under ``focus``. An earlier revision
+        fully pruned these categories from the index, which caused silent
+        capability loss in a real workflow: agent-created skills are the
+        model's accumulated project memory (server-ops runbooks, learned
+        pitfalls, …), and models do not reliably reach for ``skills_list`` to
+        rediscover what the index stopped showing them. Names-only keeps every
+        skill loadable on recall while still cutting the description noise.
+        """
+        if not self.is_coding or self.config_mode != "focus":
+            return frozenset()
+        return frozenset(self.profile.compact_skill_categories)
 
 
 def resolve_runtime_mode(
@@ -512,20 +534,23 @@ def coding_system_blocks(
     ).system_blocks()
 
 
-def coding_hidden_skill_categories(
+def coding_compact_skill_categories(
     *,
     platform: Optional[str] = None,
     cwd: Optional[str | Path] = None,
     config: Optional[dict[str, Any]] = None,
 ) -> frozenset[str]:
-    """Skill categories the active posture prunes from the prompt's skill index.
+    """Skill categories the active posture demotes to names-only in the index.
 
-    Empty outside the coding posture. Discovery-only: hidden skills remain
-    loadable via ``skills_list`` / ``skill_view``.
+    Empty outside the coding posture and outside the opt-in ``focus`` mode —
+    the default posture never touches the skill index. Under ``focus``,
+    demoted — never hidden: every skill name stays in the index and remains
+    loadable via ``skill_view`` / ``skills_list``; only descriptions are
+    dropped.
     """
     return resolve_runtime_mode(
         platform=platform, cwd=cwd, config=config
-    ).hidden_skill_categories()
+    ).compact_skill_categories()
 
 
 def _enabled_mcp_servers(config: Optional[dict[str, Any]]) -> list[str]:
