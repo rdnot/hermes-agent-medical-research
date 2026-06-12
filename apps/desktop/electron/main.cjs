@@ -29,8 +29,11 @@ const { runBootstrap } = require('./bootstrap-runner.cjs')
 const { buildSessionWindowUrl, createSessionWindowRegistry } = require('./session-windows.cjs')
 const { canImportHermesCli, verifyHermesCli } = require('./backend-probes.cjs')
 const { probeGatewayWebSocket } = require('./gateway-ws-probe.cjs')
+const { adoptServedDashboardToken } = require('./dashboard-token.cjs')
+const { PortPool } = require('./port-pool.cjs')
 const { serializeJsonBody, setJsonRequestHeaders } = require('./oauth-net-request.cjs')
 const { fetchMarketplaceThemes, searchMarketplaceThemes } = require('./vscode-marketplace.cjs')
+const { buildDesktopBackendEnv } = require('./backend-env.cjs')
 const { readDirForIpc } = require('./fs-read-dir.cjs')
 const { gitRootForIpc } = require('./git-root.cjs')
 const {
@@ -93,6 +96,7 @@ try {
       nodePty = require(nodePtyDir)
     }
   } catch {
+    console.log(`[terminal] failed to load node-pty from path ${nodePtyDir}`)
     nodePty = null
     nodePtyDir = null
   }
@@ -107,6 +111,10 @@ if (USER_DATA_OVERRIDE) {
 
 const PORT_FLOOR = 9120
 const PORT_CEILING = 9199
+// In-process port reservations that close the pickPort() TOCTOU window where
+// two concurrent backend spawns could be handed the same port. See
+// port-pool.cjs for the full rationale.
+const portPool = new PortPool(PORT_FLOOR, PORT_CEILING)
 const DEV_SERVER = process.env.HERMES_DESKTOP_DEV_SERVER
 const IS_PACKAGED = app.isPackaged
 const IS_MAC = process.platform === 'darwin'
@@ -2127,9 +2135,11 @@ function createPythonBackend(root, label, dashboardArgs, options = {}) {
     label,
     command: python,
     args: ['-m', 'hermes_cli.main', ...dashboardArgs],
-    env: {
-      PYTHONPATH: [root, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter)
-    },
+    env: buildDesktopBackendEnv({
+      hermesHome: HERMES_HOME,
+      pythonPathEntries: [root],
+      venvRoot: path.join(root, 'venv')
+    }),
     root,
     bootstrap: Boolean(options.bootstrap),
     shell: false
@@ -2148,9 +2158,11 @@ function createActiveBackend(dashboardArgs) {
     label: `Hermes at ${ACTIVE_HERMES_ROOT}`,
     command: fileExists(venvPython) ? venvPython : findSystemPython(),
     args: ['-m', 'hermes_cli.main', ...dashboardArgs],
-    env: {
-      PYTHONPATH: [ACTIVE_HERMES_ROOT, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter)
-    },
+    env: buildDesktopBackendEnv({
+      hermesHome: HERMES_HOME,
+      pythonPathEntries: [ACTIVE_HERMES_ROOT],
+      venvRoot: VENV_ROOT
+    }),
     root: ACTIVE_HERMES_ROOT,
     bootstrap: true,
     shell: false
@@ -2452,10 +2464,11 @@ function isPortAvailable(port) {
 }
 
 async function pickPort() {
-  for (let port = PORT_FLOOR; port <= PORT_CEILING; port += 1) {
-    if (await isPortAvailable(port)) return port
+  const port = await portPool.reserve(isPortAvailable)
+  if (port === null) {
+    throw new Error(`No free localhost port in ${PORT_FLOOR}-${PORT_CEILING}`)
   }
-  throw new Error(`No free localhost port in ${PORT_FLOOR}-${PORT_CEILING}`)
+  return port
 }
 
 function fetchJson(url, token, options = {}) {
@@ -4539,9 +4552,20 @@ async function spawnPoolBackend(profile, entry) {
   // --profile wins over the inherited HERMES_HOME env (see _apply_profile_override
   // step 3 in hermes_cli/main.py), so the child re-homes to this profile.
   const dashboardArgs = ['--profile', profile, 'dashboard', '--no-open', '--host', '127.0.0.1', '--port', String(port)]
-  const backend = await ensureRuntime(resolveHermesBackend(dashboardArgs))
-  const hermesCwd = resolveHermesCwd()
-  const webDist = resolveWebDist()
+  let backend
+  let hermesCwd
+  let webDist
+  try {
+    backend = await ensureRuntime(resolveHermesBackend(dashboardArgs))
+    hermesCwd = resolveHermesCwd()
+    webDist = resolveWebDist()
+  } catch (error) {
+    // These run before the child exists / its exit handler is attached, so a
+    // throw here would otherwise leak the reservation and slowly exhaust the
+    // 9120-9199 range across switch cycles in one app session.
+    portPool.release(port)
+    throw error
+  }
 
   rememberLog(`Starting Hermes backend for profile "${profile}" via ${backend.label}`)
 
@@ -4579,11 +4603,13 @@ async function spawnPoolBackend(profile, entry) {
   child.once('error', error => {
     rememberLog(`Hermes backend for profile "${profile}" failed to start: ${error.message}`)
     backendPool.delete(profile)
+    portPool.release(port)
     rejectStart?.(error)
   })
   child.once('exit', (code, signal) => {
     rememberLog(`Hermes backend for profile "${profile}" exited (${signal || code})`)
     backendPool.delete(profile)
+    portPool.release(port)
     if (!ready) {
       rejectStart?.(
         new Error(`Hermes backend for profile "${profile}" exited before it became ready (${signal || code}).`)
@@ -4594,15 +4620,21 @@ async function spawnPoolBackend(profile, entry) {
   const baseUrl = `http://127.0.0.1:${port}`
   await Promise.race([waitForHermes(baseUrl, token), startFailed])
   ready = true
+  const authToken = await adoptServedDashboardToken(baseUrl, token, {
+    childAlive: () => child.exitCode === null && !child.killed,
+    label: `Hermes backend for profile "${profile}"`,
+    rememberLog
+  })
+  entry.token = authToken
 
   return {
     baseUrl,
     mode: 'local',
     source: 'local',
     authMode: 'token',
-    token,
+    token: authToken,
     profile,
-    wsUrl: `ws://127.0.0.1:${port}/api/ws?token=${encodeURIComponent(token)}`,
+    wsUrl: `ws://127.0.0.1:${port}/api/ws?token=${encodeURIComponent(authToken)}`,
     logs: hermesLog.slice(-80),
     ...getWindowState()
   }
@@ -4612,6 +4644,7 @@ function stopPoolBackend(profile) {
   const entry = backendPool.get(profile)
   if (!entry) return
   backendPool.delete(profile)
+  if (entry.port) portPool.release(entry.port)
   if (entry.process && !entry.process.killed) {
     try {
       entry.process.kill('SIGTERM')
@@ -4697,6 +4730,11 @@ async function startHermes() {
   }
   if (connectionPromise) return connectionPromise
 
+  // Hoisted so the outer .catch can release a port reserved by pickPort() when
+  // a throw (e.g. ensureRuntime failing) happens before the child's exit
+  // handler is attached. Stays null on the remote path (no port picked).
+  let reservedPort = null
+
   connectionPromise = (async () => {
     await advanceBootProgress('backend.resolve', 'Resolving Hermes backend', 8)
     // Resolve for the desktop's primary profile so a per-profile remote
@@ -4726,6 +4764,7 @@ async function startHermes() {
 
     await advanceBootProgress('backend.port', 'Finding an open local port', 16)
     const port = await pickPort()
+    reservedPort = port
     const token = crypto.randomBytes(32).toString('base64url')
     const dashboardArgs = ['dashboard', '--no-open', '--host', '127.0.0.1', '--port', String(port)]
     // Pin the desktop's chosen profile via the global --profile flag. This is
@@ -4790,6 +4829,7 @@ async function startHermes() {
       )
       hermesProcess = null
       connectionPromise = null
+      portPool.release(port)
       sendBackendExit({ code: null, signal: null, error: error.message })
       rejectBackendStart?.(error)
     })
@@ -4797,6 +4837,7 @@ async function startHermes() {
       rememberLog(`Hermes backend exited (${signal || code})`)
       hermesProcess = null
       connectionPromise = null
+      portPool.release(port)
       sendBackendExit({ code, signal })
       if (!backendReady) {
         const message = `Hermes backend exited before it became ready (${signal || code}).`
@@ -4821,6 +4862,11 @@ async function startHermes() {
     await advanceBootProgress('backend.wait', 'Waiting for Hermes backend to become ready', 90)
     await Promise.race([waitForHermes(baseUrl, token), backendStartFailed])
     backendReady = true
+    const authToken = await adoptServedDashboardToken(baseUrl, token, {
+      // The exit/error handlers null hermesProcess when the child dies.
+      childAlive: () => hermesProcess !== null && hermesProcess.exitCode === null && !hermesProcess.killed,
+      rememberLog
+    })
     updateBootProgress({
       phase: 'backend.ready',
       message: 'Hermes backend is ready. Finalizing desktop startup',
@@ -4834,8 +4880,8 @@ async function startHermes() {
       mode: 'local',
       source: 'local',
       authMode: 'token',
-      token,
-      wsUrl: `ws://127.0.0.1:${port}/api/ws?token=${encodeURIComponent(token)}`,
+      token: authToken,
+      wsUrl: `ws://127.0.0.1:${port}/api/ws?token=${encodeURIComponent(authToken)}`,
       logs: hermesLog.slice(-80),
       ...getWindowState()
     }
@@ -4851,6 +4897,7 @@ async function startHermes() {
       { allowDecrease: true }
     )
     connectionPromise = null
+    portPool.release(reservedPort)
     throw error
   })
 
@@ -5125,8 +5172,8 @@ ipcMain.handle('hermes:bootstrap:reset', async () => {
   // reset connection state so the next startHermes() call restarts the
   // full backend flow (including a fresh runBootstrap pass).
   rememberLog('[bootstrap] reset requested by renderer; clearing latched failure')
+  await teardownPrimaryBackendAndWait()
   bootstrapFailure = null
-  connectionPromise = null
   bootstrapState = {
     active: false,
     manifest: null,
@@ -6111,6 +6158,111 @@ ipcMain.handle('hermes:vscode-theme:fetch', async (_event, id) => fetchMarketpla
 // Search the Marketplace for color-theme extensions (empty query = top installs).
 ipcMain.handle('hermes:vscode-theme:search', async (_event, query) => searchMarketplaceThemes(String(query || ''), 20))
 
+// ---------------------------------------------------------------------------
+// hermes:// deep links (e.g. hermes://blueprint/morning-brief?time=08:00).
+// A docs/dashboard "Send to App" button opens this URL; we route it into the
+// running app's chat composer. Three delivery paths: macOS 'open-url',
+// Win/Linux running-app 'second-instance' (argv), Win/Linux cold-start argv.
+// ---------------------------------------------------------------------------
+const HERMES_PROTOCOL = 'hermes'
+let _pendingDeepLink = null
+let _rendererReadyForDeepLink = false
+
+function _extractDeepLink(argv) {
+  if (!Array.isArray(argv)) return null
+  return argv.find((a) => typeof a === 'string' && a.startsWith(`${HERMES_PROTOCOL}://`)) || null
+}
+
+function handleDeepLink(url) {
+  if (!url || typeof url !== 'string') return
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch {
+    rememberLog(`[deeplink] ignoring malformed url: ${url}`)
+    return
+  }
+  // hermes://blueprint/<key>?slot=val  -> host="blueprint", path="/<key>"
+  const kind = parsed.hostname || ''
+  const name = decodeURIComponent((parsed.pathname || '').replace(/^\//, ''))
+  const params = {}
+  parsed.searchParams.forEach((v, k) => {
+    params[k] = v
+  })
+  const payload = { kind, name, params }
+
+  if (!_rendererReadyForDeepLink || !mainWindow || mainWindow.isDestroyed()) {
+    _pendingDeepLink = payload
+    return
+  }
+  try {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.focus()
+    mainWindow.webContents.send('hermes:deep-link', payload)
+    rememberLog(`[deeplink] delivered ${kind}/${name}`)
+  } catch (err) {
+    rememberLog(`[deeplink] delivery failed: ${err.message}`)
+  }
+}
+
+// Renderer calls this (via IPC) once it has mounted its deep-link listener, so
+// a link that arrived during boot/install is flushed exactly once.
+ipcMain.handle('hermes:deep-link-ready', () => {
+  _rendererReadyForDeepLink = true
+  if (_pendingDeepLink) {
+    const queued = _pendingDeepLink
+    _pendingDeepLink = null
+    handleDeepLink(
+      `${HERMES_PROTOCOL}://${queued.kind}/${encodeURIComponent(queued.name)}` +
+        (Object.keys(queued.params).length
+          ? '?' + new URLSearchParams(queued.params).toString()
+          : ''),
+    )
+  }
+  return { ok: true }
+})
+
+function registerDeepLinkProtocol() {
+  try {
+    if (process.defaultApp && process.argv.length >= 2) {
+      // Dev: register with the electron exec path + entry script so the OS can
+      // relaunch us with the URL.
+      app.setAsDefaultProtocolClient(HERMES_PROTOCOL, process.execPath, [
+        path.resolve(process.argv[1]),
+      ])
+    } else {
+      app.setAsDefaultProtocolClient(HERMES_PROTOCOL)
+    }
+  } catch (err) {
+    rememberLog(`[deeplink] protocol registration failed: ${err.message}`)
+  }
+}
+
+// Single-instance lock: deep links on a running app (Win/Linux) arrive as a
+// second-instance argv. Without the lock a second `hermes://` launch spawns a
+// whole new app instead of routing into the running one.
+const _gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!_gotSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', (_event, argv) => {
+    const url = _extractDeepLink(argv)
+    if (url) handleDeepLink(url)
+    else if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+    }
+  })
+}
+
+// macOS delivers deep links via 'open-url' — register early (can fire before
+// whenReady; handleDeepLink queues until the renderer is ready).
+app.on('open-url', (event, url) => {
+  event.preventDefault()
+  handleDeepLink(url)
+})
+
+
 app.whenReady().then(() => {
   if (IS_MAC) {
     Menu.setApplicationMenu(buildApplicationMenu())
@@ -6119,10 +6271,15 @@ app.whenReady().then(() => {
   }
   installMediaPermissions()
   registerMediaProtocol()
+  registerDeepLinkProtocol()
   ensureWslWindowsFonts()
   configureSpellChecker()
   registerPowerResumeListeners()
   createWindow()
+
+  // Win/Linux cold start: the launching hermes:// URL is in our own argv.
+  const _coldStartLink = _extractDeepLink(process.argv)
+  if (_coldStartLink) handleDeepLink(_coldStartLink)
 
   app.on('activate', () => {
     // Recreate the primary window if it's gone. Guard on mainWindow directly

@@ -3072,11 +3072,17 @@ def _make_agent(
     from hermes_cli.runtime_provider import resolve_runtime_provider
 
     # MCP tool discovery runs in a background daemon thread at startup so a
-    # dead server can't freeze the shell (see tui_gateway/entry.py).  The agent
-    # snapshots its tool list once here and never re-reads it, so briefly wait
-    # for in-flight discovery to land before building — bounded, so a slow/dead
-    # server still can't block.  No-op once discovery has finished (every build
-    # after the first during a slow startup).
+    # dead server can't freeze the shell.  The agent snapshots its tool list
+    # once here and never re-reads it, so briefly wait for in-flight discovery
+    # to land before building — bounded, so a slow/dead server still can't
+    # block. Dashboard /api/ws uses hermes_cli.mcp_startup; TUI stdio keeps
+    # its existing tui_gateway.entry-owned thread.
+    try:
+        from hermes_cli.mcp_startup import wait_for_mcp_discovery
+
+        wait_for_mcp_discovery()
+    except Exception:
+        pass
     try:
         from tui_gateway.entry import wait_for_mcp_discovery
 
@@ -4401,6 +4407,37 @@ def _(rid, params: dict) -> dict:
     except Exception:
         pass
     return _ok(rid, usage)
+
+
+@method("credits.view")
+def _(rid, params: dict) -> dict:
+    """Structured Nous credit view for the TUI /credits command.
+
+    Account-independent (a portal fetch gated on "a Nous account is logged in"),
+    so it works with no live agent / on a resumed session — same as the /usage
+    credits block. Returns the surface-agnostic CreditsView fields so the TUI can
+    render a clickable top-up <Link>. Fail-open: a portal hiccup or logged-out
+    account yields {logged_in: false}, never an error the user has to parse.
+    """
+    try:
+        from agent.account_usage import build_credits_view
+
+        view = build_credits_view()
+        return _ok(
+            rid,
+            {
+                "logged_in": bool(view.logged_in),
+                "balance_lines": [
+                    line for line in view.balance_lines if not line.lstrip().startswith("📈")
+                ],
+                "identity_line": view.identity_line,
+                "topup_url": view.topup_url,
+                "depleted": bool(view.depleted),
+            },
+        )
+    except Exception:
+        # Fail-open: TUI treats this as "not logged in" and shows the prompt.
+        return _ok(rid, {"logged_in": False, "balance_lines": [], "identity_line": None, "topup_url": None, "depleted": False})
 
 
 @method("session.status")
