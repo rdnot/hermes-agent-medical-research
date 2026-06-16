@@ -247,6 +247,19 @@ def _has_valid_session_token(request: Request) -> bool:
     return hmac.compare_digest(auth.encode(), expected.encode())
 
 
+# Routes that may also authenticate via a ``?token=`` query param, for download
+# links opened by the OS shell or a new browser tab where the session header
+# can't be set. Kept narrow — same query-token tradeoff as the /api/pty WS.
+_QUERY_TOKEN_API_PATHS: frozenset[str] = frozenset({"/api/files/download"})
+
+
+def _has_valid_query_token(request: Request, path: str) -> bool:
+    if path not in _QUERY_TOKEN_API_PATHS:
+        return False
+    token = request.query_params.get("token", "")
+    return bool(token) and hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode())
+
+
 def _require_token(request: Request) -> None:
     """Authorize a sensitive endpoint, raising 401 if the caller isn't allowed.
 
@@ -403,7 +416,7 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
     path = request.url.path
     if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
-        if not _has_valid_session_token(request):
+        if not _has_valid_session_token(request) and not _has_valid_query_token(request, path):
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Unauthorized"},
@@ -1407,6 +1420,40 @@ async def read_managed_file(request: Request, path: str):
         "data_url": f"data:{mime_type};base64,{encoded}",
         **_managed_response_meta(policy),
     }
+
+
+@app.get("/api/files/download")
+async def download_managed_file(request: Request, path: str):
+    """Stream a managed file as an attachment download.
+
+    Remote clients (desktop app, browser dashboard) open agent-written files
+    that live on *this* gateway's disk, not theirs. Auth-gated like every other
+    managed-files route — ``auth_middleware`` additionally accepts the session
+    token as a ``?token=`` query param here so a shell/browser-opened download
+    (which can't set the session header) still authenticates. See ``/api/pty``
+    for the same query-token precedent.
+    """
+    policy, target, _display_path = _resolve_managed_path(path, request)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail="Path is not a file")
+
+    try:
+        size = target.stat().st_size
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not stat file: {exc}")
+    if size > _MANAGED_FILE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="File is too large")
+
+    mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+
+    return FileResponse(
+        path=str(target),
+        media_type=mime_type,
+        filename=target.name,
+        content_disposition_type="attachment",
+    )
 
 
 @app.post("/api/files/upload")
@@ -5181,10 +5228,39 @@ def _resolve_provider_status(provider_id: str, status_fn) -> Dict[str, Any]:
     return {"logged_in": False}
 
 
+def _oauth_provider_disconnect_command(provider: Dict[str, Any]) -> Optional[str]:
+    """Shell command that clears an external provider's credentials.
+
+    External providers store their credentials outside Hermes, so the disconnect
+    API deliberately refuses them (we never delete files another CLI owns on the
+    user's behalf via a silent API call). For the ones we know how to clear we
+    instead hand the GUI a command it can *run in the embedded terminal* — the
+    user sees exactly what executes, and Hermes then stops resolving the token.
+
+    Claude Code has no scriptable logout (only the interactive ``/logout``), so
+    we remove the credential the same way logout does: the macOS Keychain entry
+    (``Claude Code-credentials``) and/or the ``~/.claude/.credentials.json``
+    file — the two sources ``read_claude_code_credentials()`` consults. Returns
+    None for providers we can't safely clear (the GUI shows a manual hint).
+    """
+    if provider.get("flow") != "external":
+        return None
+    if provider.get("id") == "claude-code":
+        rm_file = "rm -f ~/.claude/.credentials.json"
+        if sys.platform == "darwin":
+            return f'security delete-generic-password -s "Claude Code-credentials" 2>/dev/null; {rm_file}'
+        return rm_file
+    return None
+
+
 def _oauth_provider_disconnect_hint(provider: Dict[str, Any], status: Dict[str, Any]) -> Optional[str]:
     """Return the manual disconnect path when the API cannot clear this provider."""
     if provider.get("flow") == "external":
-        return f"Use `{provider['cli_command']}` or that provider's CLI to remove it."
+        if _oauth_provider_disconnect_command(provider):
+            # The GUI offers a one-click "run in terminal" path; this hint is the
+            # fallback wording for surfaces that only show text.
+            return "Managed outside Hermes — run the disconnect command to remove it."
+        return "Managed by that provider's CLI; remove it there."
     if status.get("source") == "env_var":
         return "Remove the API key from Settings → Keys instead."
     return None
@@ -5199,6 +5275,8 @@ async def list_oauth_providers(profile: Optional[str] = None):
         name            human label
         flow            "pkce" | "device_code" | "external" | "loopback"
         cli_command     fallback CLI command for users to run manually
+        disconnect_command  shell command that clears an external provider's
+                            creds (run in the embedded terminal), else null
         docs_url        external docs/portal link for the "Learn more" link
         status:
           logged_in        bool — currently has usable creds
@@ -5220,6 +5298,7 @@ async def list_oauth_providers(profile: Optional[str] = None):
                 "cli_command": p["cli_command"],
                 "docs_url": p["docs_url"],
                 "disconnect_hint": disconnect_hint,
+                "disconnect_command": _oauth_provider_disconnect_command(p),
                 "disconnectable": disconnect_hint is None,
                 "status": status,
             })
