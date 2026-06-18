@@ -1941,7 +1941,7 @@ WEB_SEARCH_SCHEMA = {
 }
 
 _EXTRACT_DESC = (
-    "Extract content from web page URLs. Returns page content in markdown format. Also works with PDF URLs (arxiv papers, documents, etc.) — pass the PDF link directly and it converts to markdown text. Pages under 5000 chars return full markdown; larger pages return raw extracted text (LLM summarization disabled). Documents over 500K chars use chunked LLM summarization. Pages over 2M chars are refused. If a URL fails or times out, use the browser tool to access it instead."
+    "Extract content from web page URLs. Returns page content in markdown format. Also works with PDF URLs (arxiv papers, documents, etc.) — pass the PDF link directly and it converts to markdown text. Pages under 500k chars return full markdown (LLM summarization disabled for pages under 500k chars). Pages over 500k chars use chunked LLM summarization. Pages over 2M chars are refused. If a URL fails or times out, use the browser tool to access it instead."
 )
 # Fork: surface local extract backend awareness so the agent knows which fetcher is in use.
 if _get_extract_backend() == "local":
