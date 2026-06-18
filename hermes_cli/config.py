@@ -925,6 +925,15 @@ DEFAULT_CONFIG = {
         # plausible-looking output when a real path is blocked.  Costs ~80
         # tokens in the cached system prompt.  Set False to disable globally.
         "task_completion_guidance": True,
+        # Universal parallel-tool-call guidance — short prompt block applied to
+        # all models that tells the model to batch independent tool calls
+        # (reads, searches, web fetches, read-only commands) into one turn
+        # instead of one call per turn.  The runtime already runs independent
+        # calls concurrently, so this just steers the model to produce the
+        # batch — cutting round-trips and the resent-context cost that
+        # compounds over a long conversation.  Costs ~70 tokens in the cached
+        # system prompt.  Set False to disable globally.
+        "parallel_tool_call_guidance": True,
         # Local-environment toolchain probe — surfaces Python/pip/uv/PEP-668
         # state in the system prompt when something non-default is detected
         # (e.g. python3 has no pip module, pip→python version mismatch, PEP
@@ -2496,11 +2505,14 @@ DEFAULT_CONFIG = {
     "updates": {
         # Run a full ``hermes backup``-style zip of HERMES_HOME before every
         # ``hermes update``.  Backups land in ``<HERMES_HOME>/backups/`` and
-        # can be restored with ``hermes import <path>``.  Off by default —
-        # on large HERMES_HOME directories the zip can add minutes to every
-        # update.  Set to true to re-enable, or pass ``--backup`` to opt in
-        # for a single update run.
-        "pre_update_backup": False,
+        # can be restored with ``hermes import <path>``.  Defaults to true
+        # after the #48200 incident: a ``hermes update --yes`` run that
+        # computed a wrong path silently wiped the user's ``.env``,
+        # ``MEMORY.md``, ``kanban.db``, custom skills, and scripts in one
+        # go.  The cost of a few minutes of zip time per update is
+        # negligible compared to the alternative.  Set to false to opt
+        # out, or pass ``--no-backup`` for a single update run.
+        "pre_update_backup": True,
         # How many pre-update backup zips to retain.  Older ones are pruned
         # automatically after each successful backup.  Values below 1 are
         # floored to 1 — the backup just created is always preserved.  To
