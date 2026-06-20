@@ -94,7 +94,13 @@ except ImportError:
     HAS_CURL_CPERF = False
 
 try:
-    from scrapling.engines._browsers._stealth import AsyncStealthySession
+    # Public API path: `scrapling.fetchers` lazy-exports AsyncStealthySession
+    # via its _LAZY_IMPORTS dict (verified on Scrapling 0.4.9). Prefer this over
+    # the deep internal path `scrapling.engines._browsers._stealth` because the
+    # latter is a private module (leading underscore) and may move between
+    # Scrapling releases. Both paths resolve to the same class object.
+    # Matches nanobot fork scrapling branch (rdnot/nanobot-medical-research).
+    from scrapling.fetchers import AsyncStealthySession
     HAS_SCRAPLING = True
 except ImportError:
     HAS_SCRAPLING = False
@@ -908,7 +914,13 @@ def _html_to_text(html: str, url: str = "") -> str:
         text = re.sub(r'\s+', ' ', text).strip()
         return text
     # Use trafilatura for better extraction
-    text = trafilatura.extract(html, url=url, include_comments=False)
+    # include_comments=True keeps Reddit-thread/forum/Disqus comment text;
+    # default in trafilatura 2.x is True, but Hermes historically passed False
+    # which discarded `<shreddit-comment>`/`<div class="comment-*">` subtrees.
+    # Set to True to match nanobot fork scrapling branch (rdnot/nanobot-medical-research
+    # web.py:323-330 leaves include_comments at its default). On a Reddit thread this
+    # raises extraction from ~310 words to ~1,100 words.
+    text = trafilatura.extract(html, url=url, include_comments=True, include_tables=True)
     return text or html
 
 
