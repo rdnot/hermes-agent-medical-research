@@ -218,10 +218,22 @@ class TestBudgetForContextWindow:
         assert budget_for_context_window(-5) is DEFAULT_BUDGET
 
     def test_large_model_unchanged(self):
-        """A 200K-token model keeps the historical 100K/200K char defaults."""
+        """A 200K-token model gets proportional (15%/30%) budget, below fork ceiling.
+
+        Upstream defaults are 100K/200K, so a 200K model hits the cap and gets
+        exactly that. The fork raised the ceiling to 400K/500K, so the same
+        200K model gets the proportional value (120K/240K) instead — it is below
+        the 400K/500K cap, so the cap doesn't kick in. This is correct behavior:
+        the fork allows larger budgets for genuinely huge pages but doesn't
+        inflate the proportional allocation for a 200K-context model.
+        """
         cfg = budget_for_context_window(200_000)
-        assert cfg.default_result_size == DEFAULT_RESULT_SIZE_CHARS
-        assert cfg.turn_budget == DEFAULT_TURN_BUDGET_CHARS
+        # Proportional values: 200K tokens * 4 chars * 0.15/0.30
+        assert cfg.default_result_size == int(200_000 * 4 * 0.15)  # 120000
+        assert cfg.turn_budget == int(200_000 * 4 * 0.30)          # 240000
+        # Both are below the fork ceiling (400K/500K) — cap didn't kick in
+        assert cfg.default_result_size <= DEFAULT_RESULT_SIZE_CHARS
+        assert cfg.turn_budget <= DEFAULT_TURN_BUDGET_CHARS
 
     def test_very_large_model_still_capped_at_default(self):
         """A 1M-token model never exceeds the historical defaults (cap)."""
