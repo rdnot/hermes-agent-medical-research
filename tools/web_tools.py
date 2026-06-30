@@ -333,7 +333,13 @@ def _web_requires_env() -> list[str]:
 # and the full text is stored on disk (see _store_full_text). Spending context,
 # not API dollars — so this is generous relative to the old 5k summary cap.
 # Override via web.extract_char_limit in config.yaml.
-DEFAULT_EXTRACT_CHAR_LIMIT = 15000
+#
+# Fork: raised to 400K (upstream default 15000) for the medical-research use
+# case — PubMed/UpToDate articles are typically 20K-80K chars and need to be
+# returned whole for thorough clinical analysis, not truncated to a 15K
+# head+tail window.  The truncation+store+read_file path still activates for
+# genuinely huge pages (>400K).
+DEFAULT_EXTRACT_CHAR_LIMIT = 400_000
 
 # Hard ceiling on the full-text file written to cache/web. The truncate-store
 # path otherwise calls path.write_text(content) with no upper bound, so a
@@ -1190,7 +1196,7 @@ async def web_extract_tool(
         urls (List[str]): List of URLs to extract content from
         format (str): Desired output format ("markdown" or "html", optional)
         char_limit (Optional[int]): Per-page char budget sent to the model
-            (default: web.extract_char_limit or 15000). Larger pages truncate.
+            (default: web.extract_char_limit or 400000). Larger pages truncate.
 
     Security: URLs are checked for embedded secrets before fetching.
 
@@ -1589,7 +1595,7 @@ WEB_SEARCH_SCHEMA = {
 _EXTRACT_DESC = (
     "Extract content from web page URLs. Returns clean page content in markdown/text "
     "(no LLM summarization — fast). Also works with PDF URLs (arxiv papers, documents) — "
-    "pass the PDF link directly. Pages within the char budget (default 15000) return whole; "
+    "pass the PDF link directly. Pages within the char budget (default 400000) return whole; "
     "larger pages return a head+tail window with a footer telling you the full text's saved "
     "file path and the read_file call to page through the omitted middle. Inline images appear "
     "as [IMAGE: alt] placeholders; real image URLs are kept as links. If a URL fails or times "
@@ -1616,7 +1622,7 @@ WEB_EXTRACT_SCHEMA = {
             },
             "char_limit": {
                 "type": "integer",
-                "description": "Optional per-page character budget sent back (default 15000). Pages larger than this are head+tail truncated with the full text stored to disk. Raise it when you need more of a long page inline.",
+                "description": "Optional per-page character budget sent back (default 400000). Pages larger than this are head+tail truncated with the full text stored to disk. Raise it when you need more of a long page inline.",
                 "minimum": 2000
             }
         },
