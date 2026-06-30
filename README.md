@@ -4,7 +4,7 @@
 >
 > — **89/100** · *Claude (free tier), acting as a satisfied reviewer*
 
-**Last fork README.md update:** 2026-06-05
+**Last fork README.md update:** 2026-06-30
 
 ## Nanobot Medical Research Fork → Hermes Port Status
 
@@ -17,9 +17,10 @@
 | **Max Iterations (200)** | ✅ Default | ✅ Fork | P0 |
 | **max_tool_result_chars (400K)** | ✅ | ✅ Fork | P0 |
 | **SearXNG Search** | ✅ Hardcoded URL | ✅ Upstream | `web.search_backend: searxng` |
-| **Disabled LLM Summarization 5K-500K** | ✅ | ✅ Fork | Returns raw text |
-| **MAX_OUTPUT_SIZE (10K)** | ✅ | ✅ Fork | Upstream: 5K |
-| **web_extract threshold (500K)** | ✅ | ✅ Fork | Upstream: 100K |
+| **LLM Summarization** | ✅ Disabled | ✅ Upstream removed | Deterministic truncation replaces it |
+| **Extract char_limit (400K)** | ✅ | ✅ Fork | Upstream: 15000 — fork raised to 400K |
+| **web_extract max_result_size (500K)** | ✅ | ✅ Fork | Upstream: 100K |
+| **Deterministic truncation** | — | ✅ Upstream | Replaces LLM summarization (>400K pages) |
 | **WhatsApp Channel** | ✅ | ❌ Native | Hermes handles natively |
 | **Commands (/s, /c, /rerun)** | ✅ | ❌ SKIP | Hermes has prefix matching |
 | **ExecTool timeout (90s)** | ✅ | ❌ Config | `code_execution.timeout` |
@@ -27,7 +28,7 @@
 | **ReadFileTool limits** | ✅ | ❌ Config | `file_read_max_chars` |
 | **_CHAT_RETRY_DELAYS** | ✅ 5 attempts | ❌ SKIP | Hermes: 3 retries, jittered |
 
-## Fork Changes (20 customizations)
+## Fork Changes (22 customizations)
 
 ### Web Tools (`tools/web_tools.py`)
 - **Tiered Local Fetcher**: curl_cffi (Chrome TLS) → Scrapling (JS/Cloudflare) → httpx fallback
@@ -35,8 +36,9 @@
 - **Per-capability backend split**: Fork adds `local` as extract backend with smart fallback
 - **SearXNG**: Upstream native support for `web.search_backend: searxng` (set `SEARXNG_URL` in env)
 - **PDF & HTML**: PyMuPDF for PDFs, trafilatura for HTML-to-text
-- **LLM summarization disabled** for 5K–500K range (returns raw text)
-- **MAX_OUTPUT_SIZE = 10,000** (upstream: 5,000)
+- **No LLM summarization** — upstream removed it entirely (Jun 2026). The fork's prior "disable for 5K–500K" patch is now obsolete; the entire `process_content_with_llm` → `_call_summarizer_llm` → `_process_large_content_chunked` chain and `auxiliary_client` import were deleted. Content is **never** sent to an LLM for summarization at any size.
+- **Deterministic truncation replaces summarization**: Upstream's `_truncate_with_footer()` does a head+tail cut on a markdown line boundary with an explicit footer (full text stored to `cache/web/`, footer tells the model the `read_file` offset for the omitted middle). Zero model involvement.
+- **Extract char_limit = 400,000** (fork raised from upstream's 15,000) — medical articles (20K–80K chars) are returned **whole**, not truncated to 15K. Only pages >400K get head+tail truncation.
 - **`web_extract` max_result_size_chars = 500,000** (upstream: 100,000)
 - **Auto-fallback**: Local extract fails → falls back to `web.backend`, skips search-only backends
 - **PubMed/PMC hardening**: reCAPTCHA retry + article-content validator (rejects HTTP-200 title-only shells); Jina Reader fallback for PMC URLs only when all raw fetchers return non-article HTML
@@ -116,6 +118,7 @@ web:
   backend: tavily              # shared fallback for both search and extract
   search_backend: tavily       # specify search provider (tavily | brave-free | searxng | exa | parallel | firecrawl) 
   extract_backend: local       # fork: free local extraction (curl_cffi → scrapling → httpx → fallback to web.backend)
+  extract_char_limit: 400000   # fork: per-page char budget (upstream default 15000). Pages ≤ this return whole; larger pages get head+tail truncated with full text stored to cache/web/
 ```
 
 **Backend resolution logic:**
@@ -127,6 +130,8 @@ web:
 | `tavily` / `exa` / `parallel` | That API directly | Error |
 | `searxng` | Error (search-only, cannot extract) | — |
 | `""` (empty) | Falls to `web.backend`, then auto-detect from env | Error |
+
+> **Content handling (all backends):** No LLM summarization — content is returned as clean text (trafilatura for local, backend-native extraction for cloud). Pages ≤ `extract_char_limit` (default 400,000) are returned whole. Pages exceeding the limit get a deterministic head+tail truncation with the full text stored to `cache/web/` and a footer telling the model the `read_file` offset for the omitted middle.
 
 - **Tell Hermes to** : install required dependencies (curl_cffi, scrapling, scrapling[fetchers], trafilatura, PyMuPDF (PyMuPDF is optional)) then install the browser dependencies with `scrapling install`)
 
