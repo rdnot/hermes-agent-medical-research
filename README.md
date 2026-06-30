@@ -118,7 +118,7 @@ web:
   backend: tavily              # shared fallback for both search and extract
   search_backend: tavily       # specify search provider (tavily | brave-free | searxng | exa | parallel | firecrawl) 
   extract_backend: local       # fork: free local extraction (curl_cffi → scrapling → httpx → fallback to web.backend)
-  extract_char_limit: 400000   # fork: per-page char budget (upstream default 15000). Pages ≤ this return whole; larger pages get head+tail truncated with full text stored to cache/web/
+  # extract_char_limit: 400000 # OPTIONAL — fork default is already 400000. Set only if you want a different limit.
 ```
 
 **Backend resolution logic:**
