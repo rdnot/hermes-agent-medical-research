@@ -140,6 +140,21 @@ import sys
 logger = logging.getLogger(__name__)
 
 
+def _web_extract_url(value: Any) -> Optional[str]:
+    """Return a usable URL from a model-supplied extract item.
+
+    Models sometimes forward a complete web-search result instead of its URL.
+    Accept the two common URL keys, but reject missing/non-string values rather
+    than stringifying arbitrary objects into misleading fetch targets.
+    """
+    if isinstance(value, dict):
+        value = value.get("url") or value.get("href")
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
 # ─── Backend Selection ────────────────────────────────────────────────────────
 
 def _env_value(name: str) -> str:
@@ -1304,7 +1319,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
 
 
 async def web_extract_tool(
-    urls: List[str],
+    urls: List[Any],
     format: str = None,
     char_limit: Optional[int] = None,
 ) -> str:
@@ -1320,7 +1335,8 @@ async def web_extract_tool(
     ``[IMAGE: alt]`` placeholders (real image URLs are preserved as links).
 
     Args:
-        urls (List[str]): List of URLs to extract content from
+        urls (List[Any]): URL strings or search-result objects containing a
+            string ``url`` or ``href`` field
         format (str): Desired output format ("markdown" or "html", optional)
         char_limit (Optional[int]): Per-page char budget sent to the model
             (default: web.extract_char_limit or 400000). Larger pages truncate.
@@ -1340,7 +1356,21 @@ async def web_extract_tool(
     from agent.redact import _PREFIX_RE
     from urllib.parse import unquote
     normalized_urls: List[str] = []
-    for _url in urls:
+    normalized_indices: List[int] = []
+    invalid_urls: Dict[int, Dict[str, Any]] = {}
+    for index, item in enumerate(urls):
+        _url = _web_extract_url(item)
+        if _url is None:
+            invalid_urls[index] = {
+                "url": "",
+                "title": "",
+                "content": "",
+                "error": (
+                    f"Invalid URL item at index {index}: expected a URL string "
+                    "or an object with a string 'url' or 'href' field"
+                ),
+            }
+            continue
         normalized_url = normalize_url_for_request(_url)
         if (
             _PREFIX_RE.search(_url)
@@ -1365,6 +1395,7 @@ async def web_extract_tool(
                 ),
             })
         normalized_urls.append(normalized_url)
+        normalized_indices.append(index)
 
     debug_call_data = {
         "parameters": {
@@ -1386,15 +1417,17 @@ async def web_extract_tool(
 
         # ── SSRF protection — filter out private/internal URLs before any backend ──
         safe_urls = []
-        ssrf_blocked: List[Dict[str, Any]] = []
-        for url in normalized_urls:
+        safe_indices = []
+        ssrf_blocked: Dict[int, Dict[str, Any]] = {}
+        for index, url in zip(normalized_indices, normalized_urls):
             if not await async_is_safe_url(url):
-                ssrf_blocked.append({
+                ssrf_blocked[index] = {
                     "url": url, "title": "", "content": "",
                     "error": "Blocked: URL targets a private or internal network address",
-                })
+                }
             else:
                 safe_urls.append(url)
+                safe_indices.append(index)
 
         # Dispatch only safe URLs to the configured backend
         if not safe_urls:
@@ -1411,21 +1444,24 @@ async def web_extract_tool(
                 )
                 from tools.interrupt import is_interrupted as _is_interrupted
 
-                # Phase 1: local fetch
-                results = []
-                failed_urls = []
-                for u in safe_urls:
+                # Phase 1: local fetch — position-aligned so upstream's
+                # input-order reconstruction (by_index via safe_indices)
+                # assigns each result to the correct URL.
+                results = [None] * len(safe_urls)
+                failed_positions = []  # (position, url) for local failures
+                for pos, u in enumerate(safe_urls):
                     if _is_interrupted():
-                        results.append({"url": u, "error": "Interrupted", "title": ""})
+                        results[pos] = {"url": u, "error": "Interrupted", "title": ""}
                         continue
                     local_result = await _fetch_and_process_locally(u, timeout=60)
                     if local_result is not None:
-                        results.append(local_result)
+                        results[pos] = local_result
                     else:
-                        failed_urls.append(u)
+                        failed_positions.append((pos, u))
 
                 # Phase 2: fallback to web.backend for failed URLs
-                if failed_urls:
+                if failed_positions:
+                    failed_urls = [u for _, u in failed_positions]
                     # Resolve cloud fallback: try web.backend first, then extract_backend,
                     # then active extract provider walk
                     cfg = _load_web_config()
@@ -1452,14 +1488,16 @@ async def web_extract_tool(
                             fallback_results = await asyncio.to_thread(
                                 fb_provider.extract, failed_urls, format=format
                             )
-                        results.extend(fallback_results)
+                        # Place fallback results back into their original positions
+                        for (pos, _u), fb_res in zip(failed_positions, fallback_results):
+                            results[pos] = fb_res
                     else:
                         # No extract-capable fallback available
-                        for u in failed_urls:
-                            results.append({
+                        for pos, u in failed_positions:
+                            results[pos] = {
                                 "url": u, "title": "", "content": "",
                                 "error": "Local fetch failed — all local fetchers exhausted and no extract-capable cloud backend available. Set web.backend or web.extract_backend to firecrawl, tavily, exa, or parallel.",
-                            })
+                            }
             # Cloud providers: dispatch through the web search registry.
             # All seven providers (brave-free, ddgs, searxng, exa, parallel,
             # tavily, firecrawl) now live as plugins. The dispatcher is a
@@ -1550,9 +1588,25 @@ async def web_extract_tool(
             else:
                 results = []
 
-        # Merge any SSRF-blocked results back in
-        if ssrf_blocked:
-            results = ssrf_blocked + results
+        # Reconstruct the original input order across invalid, blocked, and
+        # provider-processed entries. Providers are expected to preserve the
+        # order of the safe URL list they receive.
+        if invalid_urls or ssrf_blocked:
+            safe_results = {
+                index: (
+                    results[position]
+                    if position < len(results)
+                    else {
+                        "url": safe_urls[position],
+                        "title": "",
+                        "content": "",
+                        "error": "Extract backend returned no result for this URL",
+                    }
+                )
+                for position, index in enumerate(safe_indices)
+            }
+            by_index = {**safe_results, **ssrf_blocked, **invalid_urls}
+            results = [by_index[index] for index in range(len(urls))]
 
         response = {"results": results}
         
