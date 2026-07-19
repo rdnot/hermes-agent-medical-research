@@ -246,6 +246,12 @@ class TestTruncateSnapshot:
         # Should mention how many lines were truncated
         assert "more line" in result.lower()
 
+    @pytest.mark.skip(
+        reason="Fork divergence: fork raises DEFAULT_EXTRACT_CHAR_LIMIT to 400_000 "
+        "for medical article extraction, but intentionally keeps "
+        "SNAPSHOT_SUMMARIZE_THRESHOLD at 15_000 (browser snapshots are interactive "
+        "session context, not research documents). Upstream invariant does not apply."
+    )
     def test_threshold_aligned_with_web_extract_budget(self):
         """Snapshot and web_extract share the truncate-and-store pattern —
         the per-page budget the model sees must stay aligned between them."""
