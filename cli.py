@@ -4272,7 +4272,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             try:
                 self.max_turns = int(os.getenv("HERMES_MAX_ITERATIONS", ""))
             except (TypeError, ValueError):
-                self.max_turns = 90
+                self.max_turns = 500
         else:
             self.max_turns = 200  # Fork default: increased for comprehensive research
         
@@ -7213,7 +7213,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
     
     def show_tools(self):
         """Display available tools with kawaii ASCII art."""
-        tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
+        # Pre-assembly list: /tools is a discovery/inspection surface, so it
+        # must show the full catalog including tools deferred behind the
+        # tool_search bridge (users check this to verify an MCP installed).
+        tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True,
+                                     skip_tool_search_assembly=True)
         
         if not tools:
             print("(;_;) No tools available")
@@ -13131,8 +13135,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             # Notify when iteration budget was hit
             if result and not result.get("completed") and not result.get("interrupted"):
                 _api_calls = result.get("api_calls", 0)
-                if _api_calls >= getattr(self.agent, "max_iterations", 90):
-                    _max_iter = getattr(self.agent, "max_iterations", 90)
+                if _api_calls >= getattr(self.agent, "max_iterations", 500):
+                    _max_iter = getattr(self.agent, "max_iterations", 500)
                     _cprint(
                         f"\n{_DIM}⚠ Iteration budget reached "
                         f"({_api_calls}/{_max_iter}) — "

@@ -79,7 +79,7 @@ class TestMaxTurnsResolution:
     def test_invalid_env_var_max_turns_falls_back_to_default(self):
         """Invalid env values should not crash CLI init."""
         cli_obj = _make_cli(env_overrides={"HERMES_MAX_ITERATIONS": "not-a-number"})
-        assert cli_obj.max_turns == 90
+        assert cli_obj.max_turns == 500
 
     def test_legacy_root_max_turns_is_used_when_agent_key_exists_without_value(self):
         cli_obj = _make_cli(config_overrides={"agent": {}, "max_turns": 77})
