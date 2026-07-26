@@ -18,13 +18,15 @@ Config keys this provider responds to::
 Env var::
 
     SEARXNG_URL=http://localhost:8080
+    SEARXNG_URL=http://user:password@searxng.example.com:8080
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
+from urllib.parse import unquote, urlunparse, urlparse
 
 from agent.web_search_provider import WebSearchProvider
 
@@ -42,6 +44,29 @@ def _searxng_url() -> str:
     if val is None:
         val = os.getenv("SEARXNG_URL", "")
     return (val or "").strip()
+
+
+def _parse_searxng_url(raw_url: str) -> Tuple[str, Optional[Tuple[str, str]]]:
+    """Split a SearXNG URL into a clean URL and an optional Basic Auth tuple.
+
+    Supports URLs that embed credentials such as
+    ``http://user:password@searxng.example.com:8080/``. The credentials are returned
+    as ``(username, password)`` for ``httpx``'s ``auth`` parameter, and the
+    request URL is stripped of them so that they do not leak into logs or the
+    ``params`` dict.
+    """
+    parsed = urlparse(raw_url)
+    auth: Optional[Tuple[str, str]] = None
+    if parsed.username is not None:
+        # percent-decode so encoded characters (e.g. pa%40ss -> pa@ss) are
+        # sent to httpx as the literal credentials, not the raw encoding.
+        auth = (unquote(parsed.username), unquote(parsed.password or ""))
+        # Rebuild the URL without the netloc credentials.
+        netloc = parsed.hostname or ""
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+        parsed = parsed._replace(netloc=netloc)
+    return urlunparse(parsed), auth
 
 
 class SearXNGWebSearchProvider(WebSearchProvider):
@@ -69,9 +94,12 @@ class SearXNGWebSearchProvider(WebSearchProvider):
         """Execute a search against the configured SearXNG instance."""
         import httpx
 
-        base_url = _searxng_url().rstrip("/")
-        if not base_url:
+        raw_url = _searxng_url()
+        if not raw_url:
             return {"success": False, "error": "SEARXNG_URL is not set"}
+
+        base_url, auth = _parse_searxng_url(raw_url)
+        base_url = base_url.rstrip("/")
 
         params: Dict[str, Any] = {
             "q": query,
@@ -83,6 +111,7 @@ class SearXNGWebSearchProvider(WebSearchProvider):
             resp = httpx.get(
                 f"{base_url}/search",
                 params=params,
+                auth=auth,
                 timeout=15,
                 headers={"Accept": "application/json"},
             )
@@ -146,7 +175,7 @@ class SearXNGWebSearchProvider(WebSearchProvider):
             "env_vars": [
                 {
                     "key": "SEARXNG_URL",
-                    "prompt": "SearXNG instance URL (e.g. http://localhost:8080)",
+                    "prompt": "SearXNG instance URL (e.g. http://localhost:8080, or http://user:password@host:port for authenticated instances)",
                     "url": "https://searx.space/",
                 },
             ],

@@ -207,6 +207,66 @@ class TestSearXNGSearchProviderSearch:
 
         assert calls[0] == "http://localhost:8080/search", f"Got: {calls[0]}"
 
+    def test_embedded_credentials_parsed_as_basic_auth(self, monkeypatch):
+        """Credentials in the URL are sent via httpx auth and stripped from the request URL."""
+        monkeypatch.setenv("SEARXNG_URL", "http://user:password@searxng.example.com:8080/")
+        from plugins.web.searxng.provider import SearXNGWebSearchProvider
+        mock_resp = self._make_mock_response({"results": []})
+
+        calls: list[tuple[str, dict]] = []
+        def capture_get(url, **kwargs):
+            calls.append((url, kwargs))
+            return mock_resp
+
+        with patch("httpx.get", side_effect=capture_get):
+            SearXNGWebSearchProvider().search("query", limit=5)
+
+        request_url, kwargs = calls[0]
+        assert request_url == "http://searxng.example.com:8080/search"
+        assert kwargs.get("auth") == ("user", "password")
+
+    def test_no_auth_url_unchanged(self, monkeypatch):
+        """A URL without credentials is unchanged and auth is None."""
+        monkeypatch.setenv("SEARXNG_URL", "http://localhost:8080")
+        from plugins.web.searxng.provider import SearXNGWebSearchProvider
+        mock_resp = self._make_mock_response({"results": []})
+
+        calls: list[tuple[str, dict]] = []
+        def capture_get(url, **kwargs):
+            calls.append((url, kwargs))
+            return mock_resp
+
+        with patch("httpx.get", side_effect=capture_get):
+            SearXNGWebSearchProvider().search("query", limit=5)
+
+        request_url, kwargs = calls[0]
+        assert request_url == "http://localhost:8080/search"
+        assert kwargs.get("auth") is None
+
+    def test_url_with_auth_preserves_is_available(self, monkeypatch):
+        """A URL with embedded credentials is still considered configured."""
+        monkeypatch.setenv("SEARXNG_URL", "http://user:password@searxng.example.com:8080")
+        from plugins.web.searxng.provider import SearXNGWebSearchProvider
+        assert SearXNGWebSearchProvider().is_available() is True
+
+    def test_percent_encoded_credentials_decoded(self, monkeypatch):
+        """Encoded chars in credentials are decoded before being sent (pa%40ss -> pa@ss)."""
+        monkeypatch.setenv("SEARXNG_URL", "http://us%40er:pa%40ss@searxng.example.com:8080")
+        from plugins.web.searxng.provider import SearXNGWebSearchProvider
+        mock_resp = self._make_mock_response({"results": []})
+
+        calls: list[tuple[str, dict]] = []
+        def capture_get(url, **kwargs):
+            calls.append((url, kwargs))
+            return mock_resp
+
+        with patch("httpx.get", side_effect=capture_get):
+            SearXNGWebSearchProvider().search("query", limit=5)
+
+        request_url, kwargs = calls[0]
+        assert request_url == "http://searxng.example.com:8080/search"
+        assert kwargs.get("auth") == ("us@er", "pa@ss")
+
 
 # ---------------------------------------------------------------------------
 # Integration: _is_backend_available recognizes "searxng"
