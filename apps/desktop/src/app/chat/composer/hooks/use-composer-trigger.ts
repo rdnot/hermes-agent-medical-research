@@ -2,7 +2,7 @@ import type { Unstable_TriggerAdapter, Unstable_TriggerItem } from '@assistant-u
 import { type MutableRefObject, type RefObject, useCallback, useEffect, useRef, useState } from 'react'
 
 import { hermesDirectiveFormatter } from '@/components/assistant-ui/directive-text'
-import { desktopSlashCommandTakesArgs } from '@/lib/desktop-slash-commands'
+import { desktopSlashCommandArgumentMode } from '@/lib/desktop-slash-commands'
 
 import {
   COMPLETION_ACTIONS,
@@ -89,11 +89,16 @@ export function useComposerTrigger({
     const before = textBeforeCaret(editor)
     const found = detectTrigger(before ?? composerPlainText(editor))
 
-    // The arg-stage popover is only useful for commands with an options screen.
-    // For a no-arg command it would dead-end on "No matches", so drop it — the
-    // directive is already complete.
+    // A text-only command has no completion screen once its prose begins. Mixed
+    // commands such as /goal stay live so their finite subcommands can still be
+    // suggested, while arbitrary goal text remains valid.
+    const argumentMode =
+      found?.kind === '/' && slashArgStage(found.query)
+        ? desktopSlashCommandArgumentMode(slashCommandToken(found.query))
+        : null
+
     const detected =
-      found?.kind === '/' && slashArgStage(found.query) && !desktopSlashCommandTakesArgs(slashCommandToken(found.query))
+      found?.kind === '/' && slashArgStage(found.query) && argumentMode !== 'options' && argumentMode !== 'mixed'
         ? null
         : found
 
@@ -134,6 +139,11 @@ export function useComposerTrigger({
   // Space/Tab — neither should dead-end on a popover.
   const argStageEmpty = trigger?.kind === '/' && slashArgStage(trigger.query) && !triggerLoading && !triggerItems.length
 
+  const slashFreeTextArgStage =
+    trigger?.kind === '/' &&
+    slashArgStage(trigger.query) &&
+    ['mixed', 'text'].includes(desktopSlashCommandArgumentMode(slashCommandToken(trigger.query)) ?? '')
+
   const closeTrigger = () => {
     setTrigger(null)
     setTriggerItems([])
@@ -148,9 +158,16 @@ export function useComposerTrigger({
   // the completion list is empty because the arg is already fully typed (the
   // backend completer drops exact matches). Reuses the chip path via a
   // synthetic item whose serialized form is the verbatim text.
-  const commitTypedSlashDirective = () => {
+  const commitTypedSlashDirective = (): boolean => {
     if (trigger?.kind !== '/') {
-      return
+      return false
+    }
+
+    // Free prose must stay ordinary contentEditable text. This guard also
+    // protects against a stale completion result reaching the keydown path
+    // before refreshTrigger has caught up with the latest DOM input.
+    if (desktopSlashCommandArgumentMode(slashCommandToken(trigger.query)) !== 'options') {
+      return false
     }
 
     const text = `/${trigger.query.trimEnd()}`
@@ -168,9 +185,11 @@ export function useComposerTrigger({
         rawText: text
       }
     })
+
+    return true
   }
 
-  const replaceTriggerWithChip = (item: Unstable_TriggerItem) => {
+  const replaceTriggerWithChip = (item: Unstable_TriggerItem, options?: { descend?: boolean }) => {
     const editor = editorRef.current
 
     if (!editor || !trigger) {
@@ -200,6 +219,31 @@ export function useComposerTrigger({
     const serialized = hermesDirectiveFormatter.serialize(item)
     const starter = serialized.endsWith(':')
 
+    // Tab on a folder walks INTO it instead of committing it: re-type the
+    // token as the bare path so the next `complete.path` lists that folder's
+    // children, exactly as typing the path by hand would. Enter still commits
+    // the folder itself — the two intents are distinct, so the keys are too.
+    // Only `@` folders descend; a slash command's arg list has no hierarchy.
+    const descendInto =
+      options?.descend && trigger.kind === '@' && item.type === 'folder'
+        ? String((item.metadata as { insertId?: unknown } | undefined)?.insertId ?? '')
+        : ''
+
+    if (descendInto) {
+      const path = descendInto.endsWith('/') ? descendInto : `${descendInto}/`
+      const current = composerPlainText(editor)
+      const prefix = current.slice(0, Math.max(0, current.length - trigger.tokenLength))
+
+      renderComposerContents(editor, `${prefix}@${path}`)
+      placeCaretEnd(editor)
+      draftRef.current = composerPlainText(editor)
+      setComposerText(draftRef.current)
+      requestMainFocus()
+      window.setTimeout(refreshTrigger, 0)
+
+      return
+    }
+
     // Picking a bare arg-taking command (e.g. `/personality`) shouldn't commit
     // it — expand to its options step so the popover shows the inline list, just
     // as typing `/personality ` by hand would. A serialized value with a space is
@@ -208,15 +252,15 @@ export function useComposerTrigger({
     // there's no command invocation for the args to belong to.
     const command = (item.metadata as { command?: string } | undefined)?.command ?? ''
 
-    const expandsToArgs =
-      trigger.kind === '/' && !trigger.inline && !serialized.includes(' ') && desktopSlashCommandTakesArgs(command)
+    const argumentMode = desktopSlashCommandArgumentMode(command)
+    const expandsToArgs = trigger.kind === '/' && !trigger.inline && !serialized.includes(' ') && argumentMode !== null
 
     const text = starter || serialized.endsWith(' ') ? serialized : `${serialized} `
     const directive = !starter && serialized.match(/^@([^:]+):(.+)$/)
     // No pill while expanding — the bare command stays plain text until an arg
     // is picked, at which point a single pill is emitted for the full command.
     const slashKind = !expandsToArgs && trigger.kind === '/' ? slashChipKindForItem(item) : null
-    const keepTriggerOpen = starter || expandsToArgs
+    const keepTriggerOpen = starter || (expandsToArgs && argumentMode !== 'text')
 
     const finish = () => {
       draftRef.current = composerPlainText(editor)
@@ -281,13 +325,43 @@ export function useComposerTrigger({
     finish()
   }
 
+  /** Backspace inside an `@` path drops the last segment (`a/b/` → `a/`)
+   *  instead of one character. Descending is one Tab per level, so climbing
+   *  back out should cost one key too rather than a held delete. Returns
+   *  false when the caret isn't in a path, so keydown falls through. */
+  const ascendTriggerPath = () => {
+    const editor = editorRef.current
+
+    if (!editor || trigger?.kind !== '@' || !trigger.query.includes('/')) {
+      return false
+    }
+
+    // Trailing slash means we're listing a folder's children: drop that
+    // folder. Otherwise a partial segment is typed — drop just that.
+    const trimmed = trigger.query.replace(/\/$/, '')
+    const parent = trimmed.slice(0, trimmed.lastIndexOf('/') + 1)
+
+    const current = composerPlainText(editor)
+    const prefix = current.slice(0, Math.max(0, current.length - trigger.tokenLength))
+
+    renderComposerContents(editor, `${prefix}@${parent}`)
+    placeCaretEnd(editor)
+    draftRef.current = composerPlainText(editor)
+    setComposerText(draftRef.current)
+    window.setTimeout(refreshTrigger, 0)
+
+    return true
+  }
+
   return {
     argStageEmpty,
+    ascendTriggerPath,
     closeTrigger,
     commitTypedSlashDirective,
     refreshTrigger,
     replaceTriggerWithChip,
     setTriggerActive,
+    slashFreeTextArgStage,
     trigger,
     triggerActive,
     triggerItems,
