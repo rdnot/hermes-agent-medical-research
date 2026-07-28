@@ -2112,6 +2112,7 @@ class AIAgent:
                         and not msg.get("_compressed_summary_has_user_turn")
                         else msg.get("display_kind")
                     ),
+                    display_metadata=msg.get("display_metadata"),
                     compression_lock_holder=getattr(
                         self, "_active_compression_lock_holder", None
                     ),
@@ -5087,6 +5088,11 @@ class AIAgent:
             self._client_kwargs["default_headers"] = _codex_cloudflare_headers(
                 self._client_kwargs.get("api_key", "")
             )
+        elif base_url_host_matches(base_url, "x.ai"):
+            # Cover both provider=xai and provider=xai-oauth (api.x.ai).
+            from tools.xai_http import hermes_xai_default_headers
+
+            self._client_kwargs["default_headers"] = hermes_xai_default_headers()
         else:
             # No URL-specific headers — check profile.default_headers before clearing.
             _ph_headers = None
@@ -5324,7 +5330,6 @@ class AIAgent:
                         pass
                 self._record_streamed_assistant_text(tail)
         self._current_streamed_assistant_text = ""
-        self._current_streamed_reasoning_text = ""
 
     def _record_streamed_assistant_text(self, text: str) -> None:
         """Accumulate visible assistant text emitted through stream callbacks."""
@@ -5665,15 +5670,6 @@ class AIAgent:
                 cb(text)
             except Exception:
                 pass
-            else:
-                # Only checkpoint reasoning that a surface actually displayed.
-                # show_reasoning=false leaves the callback unset, so hidden
-                # provider thinking never becomes visible transcript content.
-                if isinstance(text, str) and text:
-                    self._current_streamed_reasoning_text = (
-                        getattr(self, "_current_streamed_reasoning_text", "")
-                        + text
-                    )
 
     def _fire_tool_gen_started(self, tool_name: str) -> None:
         """Notify display layer that the model is generating tool call arguments.
@@ -6847,6 +6843,8 @@ class AIAgent:
         stream_callback: Optional[callable] = None,
         persist_user_message: Optional[Any] = None,
         persist_user_timestamp: Optional[float] = None,
+        persist_user_display_kind: Optional[str] = None,
+        persist_user_display_metadata: Optional[Dict[str, Any]] = None,
         moa_config: Optional[dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
@@ -6891,6 +6889,8 @@ class AIAgent:
                     stream_callback,
                     persist_user_message,
                     persist_user_timestamp=persist_user_timestamp,
+                    persist_user_display_kind=persist_user_display_kind,
+                    persist_user_display_metadata=persist_user_display_metadata,
                     moa_config=moa_config,
                 )
             finally:
