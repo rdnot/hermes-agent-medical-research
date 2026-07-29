@@ -1905,7 +1905,6 @@ def _start_agent_build(sid: str, session: dict) -> None:
             ready.set()
             return
 
-        worker = None
         notify_registered = False
         home_token = None
         secret_token = None
@@ -3575,14 +3574,23 @@ _APPROVAL_MODES = frozenset({"manual", "smart", "off"})
 
 
 def _load_approval_mode() -> str:
-    from hermes_cli.config import DEFAULT_CONFIG, _deep_merge
-    from tools.approval import _normalize_approval_mode
+    """Resolve the effective ``approvals.mode`` for the TUI surface.
 
-    raw_cfg = _load_cfg()
-    cfg = _deep_merge(DEFAULT_CONFIG, raw_cfg if isinstance(raw_cfg, dict) else {})
-    approvals = cfg.get("approvals")
-    raw = approvals.get("mode") if isinstance(approvals, dict) else None
-    mode = _normalize_approval_mode(raw)
+    Delegates to the canonical resolver in ``tools.approval``
+    (``_get_approval_mode``) so mode resolution cannot drift per surface —
+    the same normalization, defaults, and config precedence the approval
+    gate itself uses (see ``tools/approval.py``).
+
+    Previously this re-read the config raw via ``_load_cfg`` +
+    ``_deep_merge(DEFAULT_CONFIG, ...)`` and normalized locally, which
+    could disagree with the gate's own view of the mode (e.g. the
+    canonical ``hermes_cli.config.load_config`` path applies managed-scope
+    overlays and ``${VAR}`` env expansion that the TUI's raw YAML read did
+    not fully mirror).
+    """
+    from tools.approval import _get_approval_mode
+
+    mode = _get_approval_mode()
     return mode if mode in _APPROVAL_MODES else "manual"
 
 
@@ -3983,14 +3991,16 @@ def _apply_model_switch(
     persist_override: bool | None = None,
 ) -> dict:
     from hermes_cli.model_switch import (
-        parse_model_flags_detailed,
+        parse_model_switch_args,
         resolve_persist_behavior,
         switch_model,
+        MODEL_SWITCH_ERR_ONCE_WITH_GLOBAL,
+        MODEL_SWITCH_ERROR_TEXT,
     )
     from hermes_cli.runtime_provider import resolve_runtime_provider
 
     if parsed_flags is None:
-        parsed_flags = parse_model_flags_detailed(raw_input)
+        parsed_flags = parse_model_switch_args(raw_input)
     if hasattr(parsed_flags, "model_input"):
         model_input = parsed_flags.model_input
         explicit_provider = parsed_flags.explicit_provider
@@ -4000,8 +4010,11 @@ def _apply_model_switch(
     else:
         model_input, explicit_provider, is_global_flag, _force_refresh, is_session = parsed_flags
         one_turn = False
+    # Conflict validation delegates to the shared single-owner parser; the
+    # TUI surfaces it as a raised ValueError (its historical behavior)
+    # using the canonical error copy.
     if is_global_flag and one_turn:
-        raise ValueError("/model --once cannot be combined with --global")
+        raise ValueError(MODEL_SWITCH_ERROR_TEXT[MODEL_SWITCH_ERR_ONCE_WITH_GLOBAL])
     persist_global = (
         persist_override
         if persist_override is not None
@@ -13648,9 +13661,9 @@ def _(rid, params: dict) -> dict:
                         4009,
                         "session busy — /interrupt the current turn before switching models",
                     )
-                from hermes_cli.model_switch import parse_model_flags_detailed
+                from hermes_cli.model_switch import parse_model_switch_args
 
-                parsed_flags = parse_model_flags_detailed(value)
+                parsed_flags = parse_model_switch_args(value)
                 explicit_provider = parsed_flags.explicit_provider
                 if session.get("agent") is None and not explicit_provider.strip():
                     session_id = params.get("session_id", "")

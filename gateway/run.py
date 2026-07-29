@@ -37,23 +37,14 @@ import shlex
 import site
 import sys
 import signal
-import tempfile
 import threading
 import time
-import sqlite3
 from collections import OrderedDict
 from contextvars import copy_context
 from pathlib import Path
 from datetime import datetime
 from typing import Awaitable, Callable, Dict, Optional, Any, List, Union, cast
 
-# account_usage imports the OpenAI SDK chain (~230 ms). Only needed by
-# /usage; we still import it at module top in the gateway because test
-# patches (tests/gateway/test_usage_command.py) target
-# `gateway.run.fetch_account_usage` as a module-level attribute. The
-# gateway is a long-running daemon, so its boot cost matters less than
-# preserving the established test-patch surface.
-from agent.account_usage import fetch_account_usage, render_account_usage_lines
 from agent.async_utils import consume_detached_task_result, safe_schedule_threadsafe
 from agent.conversation_compression import (
     COMPACTION_STATUS,
@@ -407,7 +398,6 @@ def _gateway_loop_exception_handler(
     """
     exc = context.get("exception")
     if exc is not None and _is_transient_network_error(exc):
-        message = context.get("message") or "transient network error"
         task = context.get("future") or context.get("task")
         task_name = ""
         if task is not None:
@@ -1661,7 +1651,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Resolve Hermes home directory (respects HERMES_HOME override)
 from hermes_constants import get_hermes_home, get_hermes_home_override
-from utils import atomic_json_write, atomic_yaml_write, base_url_host_matches, is_truthy_value
+from utils import atomic_json_write, is_truthy_value
 _hermes_home = get_hermes_home()
 
 # Load environment variables from ~/.hermes/.env first.
@@ -2180,7 +2170,6 @@ from gateway.config import (
     Platform,
     _BUILTIN_PLATFORM_VALUES,
     GatewayConfig,
-    HomeChannel,
     PlatformConfig,
     load_gateway_config,
 )
@@ -5568,7 +5557,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         thread_id: Optional[str] = None,
         parent_id: Optional[str] = None,
     ) -> str:
-        """Resolve model for this channel: channel_overrides else global default."""
+        """Resolve model for this channel: channel_overrides else global default.
+
+        Delegates the precedence rule to
+        :func:`hermes_cli.model_switch.resolve_effective_model` (session
+        override > channel override > global default) — the single owner
+        shared with the API server, so the two surfaces cannot diverge
+        again (see 7dd00bb47d).  This call site has no session tier: session
+        /model overrides are applied later by
+        ``_apply_session_model_override`` on the resolved runtime.
+        """
+        from hermes_cli.model_switch import resolve_effective_model
+
+        override = None
         config = getattr(self, "config", None)
         if config:
             override = _get_channel_override(
@@ -5578,9 +5579,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 thread_id=thread_id,
                 parent_id=parent_id,
             )
-            if override and override.model:
-                return override.model
-        return _resolve_gateway_model(user_config)
+        return resolve_effective_model(
+            None,  # session tier applied downstream (_apply_session_model_override)
+            override,
+            _resolve_gateway_model(user_config),
+        )
 
     def _get_system_prompt_for_channel(
         self,
@@ -14350,7 +14353,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # under that profile's loaded config — check after scope install.
             if not home_env:
                 try:
-                    from hermes_cli.profiles import get_profile_dir
                     from gateway.config import load_gateway_config as _lgc
                     prof = (getattr(source, "profile", None) or "").strip()
                     if prof and prof != "default":
