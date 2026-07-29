@@ -68,6 +68,54 @@ def mock_sd(monkeypatch):
     return mock
 
 
+class _FakeTime:
+    """Stand-in for the ``time`` module with a monotonic clock the test drives.
+
+    Silence detection compares ``time.monotonic()`` deltas against thresholds
+    of a few dozen milliseconds.  Driving those deltas with real ``sleep()``
+    calls only works when the platform clock is finer-grained than the margin
+    the test leaves: ``time.monotonic()`` is ``GetTickCount64()`` (15.625 ms
+    resolution) on Windows until CPython 3.13 moved it to
+    ``QueryPerformanceCounter()``, so a 60 ms sleep can legitimately measure
+    as 46 ms and land under a 50 ms threshold.  Advancing an explicit clock
+    keeps the arithmetic exact on every platform.
+
+    Everything other than ``monotonic`` delegates to the real module, so
+    ``time.sleep``/``time.strftime`` in the code under test keep working.
+    """
+
+    def __init__(self, real_time, start: float = 1000.0) -> None:
+        self._real = real_time
+        self._now = start
+
+    def monotonic(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += seconds
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+@pytest.fixture
+def fake_clock(monkeypatch):
+    """Give voice_mode a hand-driven clock.
+
+    Patches the name ``time`` inside ``tools.voice_mode`` rather than
+    ``time.monotonic`` itself -- ``voice_mode.time`` *is* the stdlib module,
+    so setting the attribute on it would swap the clock out from under every
+    other importer for the duration of the test.
+    """
+    import time as real_time
+
+    import tools.voice_mode as voice_mode
+
+    clock = _FakeTime(real_time)
+    monkeypatch.setattr(voice_mode, "time", clock)
+    return clock
+
+
 # ============================================================================
 # detect_audio_environment — WSL / SSH / Docker detection
 # ============================================================================
@@ -1427,7 +1475,7 @@ class TestPlayBeep:
 # ============================================================================
 
 class TestSilenceDetection:
-    def test_silence_callback_fires_after_speech_then_silence(self, mock_sd):
+    def test_silence_callback_fires_after_speech_then_silence(self, mock_sd, fake_clock):
         np = pytest.importorskip("numpy")
         import threading
 
@@ -1456,7 +1504,7 @@ class TestSilenceDetection:
         # Simulate sustained speech (multiple loud chunks to exceed min_speech_duration)
         loud_frame = np.full((1600, 1), 5000, dtype="int16")
         callback(loud_frame, 1600, None, None)
-        time.sleep(0.06)
+        fake_clock.advance(0.06)
         callback(loud_frame, 1600, None, None)
         assert recorder._has_spoken is True
 
@@ -1464,12 +1512,13 @@ class TestSilenceDetection:
         silent_frame = np.zeros((1600, 1), dtype="int16")
         callback(silent_frame, 1600, None, None)
 
-        # Wait a bit past the silence duration, then send another silent frame
-        time.sleep(0.06)
+        # Move past the silence duration, then send another silent frame
+        fake_clock.advance(0.06)
         callback(silent_frame, 1600, None, None)
 
-        # The callback should have been fired
-        assert fired.wait(timeout=1.0) is True
+        # The callback should have been fired (it runs on a real thread, so
+        # this wait is the one place real time is still involved)
+        assert fired.wait(timeout=5.0) is True
 
         recorder.cancel()
 
@@ -1502,7 +1551,7 @@ class TestSilenceDetection:
 
         recorder.cancel()
 
-    def test_micro_pause_tolerance_during_speech(self, mock_sd):
+    def test_micro_pause_tolerance_during_speech(self, mock_sd, fake_clock):
         """Brief dips below threshold during speech should NOT reset speech tracking."""
         np = pytest.importorskip("numpy")
         import threading
@@ -1529,14 +1578,14 @@ class TestSilenceDetection:
 
         # Speech chunk 1
         callback(loud_frame, 1600, None, None)
-        time.sleep(0.05)
+        fake_clock.advance(0.05)
         # Brief micro-pause (dip < max_dip_tolerance)
         callback(quiet_frame, 1600, None, None)
-        time.sleep(0.05)
+        fake_clock.advance(0.05)
         # Speech resumes -- speech_start should NOT have been reset
         callback(loud_frame, 1600, None, None)
         assert recorder._speech_start > 0, "Speech start should be preserved across brief dips"
-        time.sleep(0.06)
+        fake_clock.advance(0.06)
         # Another speech chunk to exceed min_speech_duration
         callback(loud_frame, 1600, None, None)
         assert recorder._has_spoken is True, "Speech should be confirmed after tolerating micro-pause"
@@ -1850,7 +1899,7 @@ class TestAudioLevelIndicator:
 class TestConfigurableSilenceParams:
     """Verify that silence detection params can be configured."""
 
-    def test_custom_threshold_and_duration(self, mock_sd):
+    def test_custom_threshold_and_duration(self, mock_sd, fake_clock):
         np = pytest.importorskip("numpy")
 
         mock_stream = MagicMock()
@@ -1874,7 +1923,7 @@ class TestConfigurableSilenceParams:
         moderate = np.full((1600, 1), 1000, dtype="int16")
         for _ in range(5):
             callback(moderate, 1600, None, None)
-            time.sleep(0.02)
+            fake_clock.advance(0.02)
 
         assert recorder._has_spoken is False
         assert fired.wait(timeout=0.2) is False
@@ -1882,7 +1931,7 @@ class TestConfigurableSilenceParams:
         # Now send really loud audio (above 5000 threshold)
         very_loud = np.full((1600, 1), 8000, dtype="int16")
         callback(very_loud, 1600, None, None)
-        time.sleep(0.06)
+        fake_clock.advance(0.06)
         callback(very_loud, 1600, None, None)
         assert recorder._has_spoken is True
 
@@ -2024,6 +2073,77 @@ class TestListenForSpeech:
         audio after calibration must NOT trip (only louder speech does)."""
         levels = [2000] * self.CALIB_BLOCKS + [2000] * 100
         heard, _ = self._run(mock_sd, levels)
+        assert heard is False
+
+    def test_quiet_then_loud_playback_does_not_trip(self, mock_sd):
+        """TTS that starts quiet and gets louder must NOT trip barge-in.
+
+        This is the core regression: a one-shot calibration freezes the
+        floor from the quiet opening, then louder TTS exceeds the stale
+        floor and false-triggers.  The rolling window keeps the floor
+        current so the louder passage is absorbed into the floor.
+        """
+        levels = [100] * self.CALIB_BLOCKS + [200] * 30 + [500] * 30 + [1000] * 30
+        heard, _ = self._run(mock_sd, levels)
+        assert heard is False
+
+    def test_8x_multiplier_absorbs_tts_volume_spikes(self, mock_sd):
+        """TTS volume spikes that would exceed a 5x floor must NOT trip.
+
+        At 5x multiplier, a quiet TTS passage (RMS 200) sets a floor of
+        ~180 and a trigger of 900. A subsequent louder passage at RMS
+        1000 exceeds the trigger, is excluded from the floor window, and
+        after sustained_ms of consecutive above-trigger blocks the VAD
+        false-trips and cuts playback mid-sentence. The 8x multiplier
+        raises the trigger to 1440 so the 1000-RMS passage stays below
+        it and gets absorbed into the rolling floor.
+        """
+        # Calib at 200 RMS → floor ~180 → 8x trigger = 1440
+        # Then 1000 RMS TTS: below 3200 (400*8), absorbed into floor, no trip.
+        # With old 5x: trigger=2000 (400*5), 1000 < 2000, would NOT trip either.
+        # To actually test the 8x multiplier, use levels where 5x would trip
+        # but 8x would not: calib at 200 → floor=180 → 5x trigger=900,
+        # 8x trigger=1440. Feed 1200 RMS: above 900 (5x trips) but below
+        # 1440 (8x absorbs). With min_floor=400 the trigger is max(400,180*8)=1440,
+        # so 1200 < 1440 → no trip at 8x, but 1200 > 900 → would trip at 5x.
+        levels = [200] * self.CALIB_BLOCKS + [1200] * 50
+        heard, _ = self._run(mock_sd, levels)
+        assert heard is False
+
+    def test_trigger_ceiling_lets_genuine_speech_trip(self, mock_sd):
+        """Even with a loud TTS floor, genuine speech must still trip.
+
+        Loud TTS at 3000 RMS → floor ~2700 → 8x trigger = 21600, but
+        the ceiling caps it at 4000. Speech at 5000 RMS exceeds the
+        capped trigger and trips after sustained_ms blocks.
+        """
+        levels = [3000] * self.CALIB_BLOCKS + [5000] * 50
+        heard, _ = self._run(mock_sd, levels)
+        assert heard is True
+
+    def test_silence_calibration_does_not_false_trip_on_tts(self, mock_sd):
+        """Calibration during an inter-sentence gap must NOT false-trip.
+
+        If the grace period ends during a pause between TTS sentences, the
+        calibration window samples near-silence.  Without the min_floor clamp,
+        min_floor locks near zero, the trigger drops to 400 RMS (SILENCE_RMS_THRESHOLD
+        * 2), and the next TTS sentence at 800 RMS exceeds it — those blocks are
+        excluded from the rolling window (rms >= trigger), the floor freezes, and
+        after sustained_ms the VAD false-triggers and cuts playback mid-sentence.
+
+        With the clamp, min_floor stays at SILENCE_RMS_THRESHOLD * 2 = 400, the
+        trigger is max(400, 400 * 8.0) = 3200, and 800-RMS TTS stays below it and
+        feeds the rolling floor.  No false trip.
+        """
+        # calibration_ms=800 → CALIB_BLOCKS = 800/30 ≈ 26 blocks of silence
+        # Then TTS resumes at 800 RMS — must NOT trip (below 3200 trigger).
+        calib = 800 // 30
+        levels = [0] * calib + [800] * 100
+        heard, _ = self._run(
+            mock_sd, levels,
+            sustained_ms=1000,
+            calibration_ms=800,
+        )
         assert heard is False
 
 

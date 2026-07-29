@@ -1454,3 +1454,95 @@ class TestVoiceBargeCaptureSubmit:
         assert cli._pending_input.empty()
         assert not cli._voice_barge_capture.is_set()
         assert restarted.wait(2.0)  # continuous mode resumes listening
+
+
+# ============================================================================
+# Typed stop phrase — typing "stop" during a voice chat ends it
+# ============================================================================
+class TestTypedVoiceStop:
+    """_typed_voice_stop: a TYPED bare stop phrase during an active voice chat
+    ends the chat (same as saying "stop"); outside voice mode it passes
+    through to the agent untouched."""
+
+    def _cli(self, **overrides):
+        cli = _make_voice_cli(**overrides)
+        cli._disable_calls = []
+        cli._disable_voice_mode = lambda: cli._disable_calls.append(True)
+        return cli
+
+    @pytest.fixture(autouse=True)
+    def _pin_stop_phrases(self, monkeypatch):
+        # Hermetic: don't let a dev machine's voice.stop_phrases config
+        # change which utterances count as a stop phrase.
+        monkeypatch.setattr(
+            "tools.voice_mode._load_voice_stop_phrases", lambda: ("stop",)
+        )
+
+    def test_typed_stop_ends_voice_chat_when_voice_on(self):
+        cli = self._cli(_voice_mode=True)
+        assert cli._typed_voice_stop("stop") is True
+        assert cli._disable_calls == [True]
+
+    def test_typed_stop_during_continuous_mode(self):
+        cli = self._cli(_voice_mode=False, _voice_continuous=True)
+        assert cli._typed_voice_stop("Stop.") is True
+        assert cli._disable_calls == [True]
+
+    def test_typed_stop_passes_through_when_voice_off(self):
+        cli = self._cli(_voice_mode=False, _voice_continuous=False)
+        assert cli._typed_voice_stop("stop") is False
+        assert cli._disable_calls == []
+
+    def test_longer_typed_message_passes_through_in_voice_mode(self):
+        cli = self._cli(_voice_mode=True)
+        assert cli._typed_voice_stop("stop the docker container") is False
+        assert cli._disable_calls == []
+
+    def test_non_string_input_passes_through(self):
+        cli = self._cli(_voice_mode=True)
+        assert cli._typed_voice_stop(("text", ["img.png"])) is False
+        assert cli._disable_calls == []
+
+
+# ============================================================================
+# Fallback (whole-file) TTS path arms the spoken barge-in monitor
+# ============================================================================
+
+class TestFallbackSpeakArmsBargeMonitor:
+    """_voice_speak_response_async must arm _voice_barge_in_monitor in
+    continuous voice mode. Previously ONLY the streaming pipeline armed the
+    monitor (chat() gate), so when streaming TTS couldn't start the whole-file
+    fallback speech was uninterruptible by voice — Teknium's "speaking over
+    the agent does nothing" report on the non-streaming path."""
+
+    def _cli(self, **overrides):
+        cli = _make_voice_cli(**overrides)
+        cli._monitor_calls = []
+        cli._voice_barge_in_monitor = (
+            lambda stop_event: cli._monitor_calls.append(stop_event)
+        )
+        cli._voice_speak_response = lambda text: None
+        return cli
+
+    def _drain_threads(self):
+        import time
+        time.sleep(0.15)
+
+    def test_monitor_armed_in_continuous_voice_mode(self):
+        cli = self._cli(_voice_mode=True, _voice_tts=True, _voice_continuous=True)
+        cli._voice_speak_response_async("a reply")
+        self._drain_threads()
+        assert len(cli._monitor_calls) == 1
+        assert isinstance(cli._monitor_calls[0], threading.Event)
+
+    def test_no_monitor_outside_continuous_mode(self):
+        cli = self._cli(_voice_mode=True, _voice_tts=True, _voice_continuous=False)
+        cli._voice_speak_response_async("a reply")
+        self._drain_threads()
+        assert cli._monitor_calls == []
+
+    def test_no_monitor_when_tts_disabled(self):
+        cli = self._cli(_voice_mode=True, _voice_tts=False, _voice_continuous=True)
+        cli._voice_speak_response_async("a reply")
+        self._drain_threads()
+        assert cli._monitor_calls == []

@@ -1962,7 +1962,7 @@ DEFAULT_CONFIG = {
         # class of over-claim that otherwise forces users to run
         # `git status` to verify edits landed.  Set false to suppress.
         "file_mutation_verifier": True,
-        # Nous credits status-bar notices (usage bands, depleted /
+        # Nous credits status-bar notices (usage bands, grant-spent, depleted /
         # restored).  When false, no credits notices are emitted — balance data
         # is still captured and /usage keeps working.  Off switch for sub +
         # top-up users who find the gauge noisy.
@@ -2230,7 +2230,7 @@ DEFAULT_CONFIG = {
     "privacy": {
         "redact_pii": False,  # When True, hash user IDs and strip phone numbers from LLM context
     },
-    
+
     # Text-to-speech configuration
     # Each provider supports an optional `max_text_length:` override for the
     # per-request input-character cap. Omit it to use the provider's documented
@@ -2332,13 +2332,19 @@ DEFAULT_CONFIG = {
             "model": "base",  # tiny, base, small, medium, large-v3
             "language": "",  # auto-detect by default; set to "en", "es", "fr", etc. to force
             "initial_prompt": "",
+            # Anti-hallucination hardening (faster-whisper decodes junk tokens
+            # from silence/noise without these):
+            "vad": True,  # Silero VAD filter — silence never reaches whisper. false = old raw behavior (music/ambient).
+            "vad_min_silence_ms": 500,  # min silence (ms) that splits speech chunks when vad is on
+            "no_speech_prob_threshold": 0.6,  # drop a segment only if no_speech_prob is ABOVE this...
+            "logprob_threshold": -1.0,  # ...AND its avg_logprob is BELOW this (both must hit)
         },
         "groq": {
             "model": "whisper-large-v3-turbo",  # whisper-large-v3, whisper-large-v3-turbo, distil-whisper-large-v3-en
             "language": "",  # auto-detect by default; set to "en", "es", "fr", etc. to force
         },
         "openai": {
-            "model": "whisper-1",  # whisper-1, gpt-4o-mini-transcribe, gpt-4o-transcribe
+            "model": "whisper-1",  # whisper-1, gpt-4o-mini-transcribe, gpt-4o-transcribe, gpt-transcribe
             "language": "",  # auto-detect by default; set to "en", "es", "fr", etc. to force
         },
         "mistral": {
@@ -2366,13 +2372,51 @@ DEFAULT_CONFIG = {
         "auto_tts": False,
         "beep_enabled": True,         # Play record start/stop beeps in CLI voice mode
         "beep_volume": 0.3,           # Beep amplitude multiplier (0.0-1.0, default keeps prior hardcoded value)
+        "thinking_sound": True,       # Calm ambient bubble sound while the agent works in voice chat (volume follows beep_volume)
         "silence_threshold": 200,     # RMS below this = silence (0-32767)
         "silence_duration": 3.0,      # Seconds of silence before auto-stop
         "barge_in": True,             # Stop TTS playback when the user starts talking
+        "barge_in_grace_seconds": 2.0,  # Delay before the barge mic opens so VAD calibrates against live TTS playback (0 disables)
         # Saying EXACTLY one of these phrases (and nothing else) ends the
         # voice chat instead of being sent to the agent. Case-insensitive,
         # surrounding punctuation ignored. Set [] to disable.
         "stop_phrases": ["stop"],
+    },
+
+    # "Hey Hermes" hands-free wake word. Always-on, on-device hotword
+    # detection that starts a fresh voice session — the "Hey Siri" pattern.
+    # Off by default; toggle with /wake or `wake_word.enabled: true`.
+    "wake_word": {
+        "enabled": False,
+        "surface": "auto",            # eligible surface: "auto" (first claimant) | "cli" | "tui" | "gui"
+        "provider": "openwakeword",   # "openwakeword" (free, local) | "sherpa" (free, ANY phrase, no training) | "porcupine" (premium; needs PORCUPINE_ACCESS_KEY)
+        "phrase": "hey hermes",       # for "sherpa" this IS the detected phrase (any text works); for other engines it's a cosmetic label — detection is keyed by the model/keyword below
+        "sensitivity": 0.6,           # 0.0-1.0 detection threshold, consistent across engines (higher = stricter, fewer false triggers)
+        "confirmation_frames": 3,     # openWakeWord only: consecutive over-threshold frames required to fire (higher = fewer false triggers on ambient speech, slightly more latency; 1 = old single-frame behavior)
+        "start_new_session": True,    # start a fresh session on wake vs. continue the current one
+        "profile_routing": True,      # sherpa only: also listen for every wake-enabled profile's phrase and route the wake to the matching profile
+        "openwakeword": {
+            # "hey_hermes" (the bundled, works-out-of-the-box default) OR a
+            # built-in openWakeWord name ("hey_jarvis", "alexa", "hey_mycroft",
+            # ...) OR a path to a custom .onnx/.tflite model for another phrase.
+            # See the wake-word docs for the custom-model training guide.
+            "model": "hey_hermes",
+            # "" (auto — tflite on macOS ARM64, onnx elsewhere) | "onnx" | "tflite".
+            # openWakeWord's onnx backend scores near-zero on macOS ARM64
+            # (dscripka/openWakeWord#336), so auto avoids a listener that arms
+            # but never fires. Set explicitly only to override that choice.
+            "inference_framework": "",
+        },
+        "sherpa": {
+            # Optional path to a sherpa-onnx KWS model directory. Empty =
+            # auto-download the small English zipformer model on first use.
+            "model_dir": "",
+        },
+        "porcupine": {
+            # Built-in keyword ("jarvis", "computer", "bumblebee", ...) or a path
+            # to a custom .ppn from the Picovoice Console.
+            "keyword": "jarvis",
+        },
     },
     
     "human_delay": {
@@ -3167,6 +3211,44 @@ DEFAULT_CONFIG = {
         "force_ipv4": False,
     },
 
+    # Gateway monitoring — Service Health Monitoring plus redacted Operational
+    # Diagnostics for the gateway daemon, exported over OTLP to an
+    # operator-configured endpoint (OTEL Collector, DataDog, ...). Content-free
+    # by construction: no prompts, messages, tool args/results, session
+    # history, usage analytics, audit logs, or trajectories. Off by default;
+    # nothing is collected or sent until an operator enables it and sets an
+    # endpoint.
+    "monitoring": {
+        # Stable install identifier attached to exported health signals so an
+        # operator can tell instances apart in their collector. Empty string
+        # means "mint a fresh UUID on first use"; clear it to rotate. Carries
+        # no account identity.
+        "install_id": "",
+        # Gateway health & diagnostics export.
+        "gateway_health_export": {
+            "enabled": False,
+            "metrics_enabled": True,
+            "diagnostic_events_enabled": True,
+            "warning_error_events_enabled": True,
+            "export_interval_seconds": 60,
+            "logs_export_interval_seconds": 5,
+            "resource_attributes": {
+                "service.name": "hermes-gateway",
+                "deployment.environment.name": "production",
+            },
+        },
+        # OTLP destination. headers_env maps header names to ENVIRONMENT
+        # VARIABLE NAMES (never secret values); values are read from the
+        # environment at export time.
+        "export": {
+            "otlp": {
+                "enabled": False,
+                "endpoint": "",
+                "headers_env": {},
+            },
+        },
+    },
+
     # Gateway settings — control how messaging platforms (Telegram, Discord,
     # Slack, etc.) deliver agent-produced files as native attachments.
     "gateway": {
@@ -3536,6 +3618,14 @@ DEFAULT_CONFIG = {
         # ``"off"`` — alias for ``manual``.
         "install_strategy": "auto",
 
+        # Idle language servers are shut down automatically after this
+        # many seconds with no file activity, then respawned on demand.
+        # Prevents long-running gateway/CLI processes from accumulating
+        # stale pyright/gopls/tsserver children (hundreds of MB each,
+        # plus pipe FDs) as the agent moves across worktrees.  Set to 0
+        # to disable idle reaping and keep servers for process lifetime.
+        "idle_timeout": 600.0,
+
         # Per-server overrides.  Each key is a server_id from the
         # registry (``pyright``, ``typescript``, ``gopls``,
         # ``rust-analyzer``, etc.) and accepts:
@@ -3787,6 +3877,15 @@ DEFAULT_CONFIG = {
         #   false   - always keep GPU acceleration on, even over a remote display.
         # Bridged to the HERMES_DESKTOP_DISABLE_GPU env var the Electron app reads.
         "disable_gpu": "auto",
+        # macOS only: optional persistent code-signing identity (a cert in the
+        # login keychain — a self-signed "Code Signing" cert from Keychain
+        # Access works; no Apple Developer account needed) used to re-sign
+        # locally rebuilt desktop apps. A certificate-anchored Designated
+        # Requirement stays stable across rebuilds, so TCC grants (Full Disk
+        # Access, Desktop/Downloads/Documents, Accessibility, Automation,
+        # microphone) survive every update. Empty keeps the default stable
+        # ad-hoc signing (identifier-pinned requirement).
+        "macos_signing_identity": "",
         # Auto-continue a turn that was killed mid-run by an app/backend/machine
         # crash: resuming that session re-submits the interrupted prompt (shown
         # as a "resumed interrupted turn" event) if the interruption is fresh.
@@ -4435,6 +4534,13 @@ OPTIONAL_ENV_VARS = {
         "description": "Mistral API key for Voxtral TTS and transcription (STT)",
         "prompt": "Mistral API key",
         "url": "https://console.mistral.ai/",
+        "password": True,
+        "category": "tool",
+    },
+    "PORCUPINE_ACCESS_KEY": {
+        "description": "Picovoice access key for the Porcupine 'Hey Hermes' wake word engine (optional; openWakeWord is the free default)",
+        "prompt": "Picovoice access key",
+        "url": "https://console.picovoice.ai/",
         "password": True,
         "category": "tool",
     },
