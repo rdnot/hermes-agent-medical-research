@@ -697,14 +697,15 @@ load_hermes_dotenv(project_env=PROJECT_ROOT / ".env")
 # `load_config()` was doing a full deep-merge for one boolean lookup).
 _FORCE_IPV4_EARLY = False
 try:
-    import yaml as _yaml_early
+    # Reuse read_raw_config()'s (mtime, size)-keyed cache instead of a bespoke
+    # yaml.load — the SAME parse then serves hermes_logging's
+    # _read_logging_config and any later raw reads in this process, collapsing
+    # 3-4 config.yaml parses per invocation into one.
+    from hermes_cli.config import read_raw_config as _read_raw_early
 
     _cfg_path = get_hermes_home() / "config.yaml"
     if _cfg_path.exists():
-        with open(_cfg_path, encoding="utf-8") as _f:
-            _early_cfg_raw = _yaml_early.load(
-                _f, Loader=getattr(_yaml_early, "CSafeLoader", None) or _yaml_early.SafeLoader
-            ) or {}
+        _early_cfg_raw = _read_raw_early() or {}
         # Managed scope: overlay administrator-pinned values so a managed
         # security.redact_secrets / network.force_ipv4 wins here too. This early
         # bridge reads config.yaml directly (before load_config is usable), so
@@ -1818,7 +1819,9 @@ def _ensure_tui_node() -> None:
     if not helper.is_file():
         return
 
-    hermes_home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+    from hermes_constants import get_hermes_home
+
+    hermes_home = str(get_hermes_home())
     try:
         # Helper writes logs to stderr; we ask bash to print `command -v node`
         # on stdout once ensure_node succeeds. Subshell PATH edits don't leak
@@ -2256,7 +2259,10 @@ def _launch_tui(
 
     import tempfile
 
-    env = os.environ.copy()
+    # TUI child is a hermes process: propagate the profile-home contract via
+    # the single factory; keep secrets (the TUI/agent needs provider creds).
+    from tools.environments.local import build_subprocess_env
+    env = build_subprocess_env(scrub_secrets=False, inherit_profile_home=True)
     try:
         from hermes_cli.config import apply_terminal_config_to_env
         apply_terminal_config_to_env(env=env)
@@ -2350,7 +2356,8 @@ def _launch_tui(
         _tokens.append(f"--max-old-space-size={_resolve_tui_heap_mb()}")
     env["NODE_OPTIONS"] = " ".join(_tokens)
     # HERMES_TUI_RESUME is an internal hand-off from the Python wrapper to the
-    # Ink app.  Because we start from os.environ.copy(), an exported/stale value
+    # Ink app.  Because we start from a full os.environ snapshot (via
+    # build_subprocess_env), an exported/stale value
     # in the user's shell would otherwise make a plain `hermes --tui` try to
     # resume a non-existent session and leave the UI at "error: session not
     # found" with no live session.  Only forward a resume id that argparse
@@ -11024,15 +11031,33 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
     depth_args = ["--depth", "1"] if is_shallow else []
 
     if branch == "main":
-        print("→ Fetching from upstream...")
-        fetch_result = subprocess.run(
-            git_cmd + ["fetch"] + depth_args + ["upstream", branch],
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
+        # Probe locally (~6 ms) whether an 'upstream' remote exists at all
+        # before spending a network fetch on it. Non-fork installs have no
+        # 'upstream' remote, and the old flow burned a failed network attempt
+        # (~0.3-1 s) on every --check before falling back to origin.
+        has_upstream_remote = (
+            subprocess.run(
+                git_cmd + ["remote", "get-url", "upstream"],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True, encoding="utf-8", errors="replace",
+            ).returncode
+            == 0
         )
-        if fetch_result.returncode != 0:
-            # Fallback to origin if upstream doesn't exist
+        fetch_result = None
+        if has_upstream_remote:
+            print("→ Fetching from upstream...")
+            fetch_result = subprocess.run(
+                git_cmd + ["fetch"] + depth_args + ["upstream", branch],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True, encoding="utf-8", errors="replace",
+            )
+        if fetch_result is not None and fetch_result.returncode == 0:
+            upstream_exists = True
+            compare_branch = f"upstream/{branch}"
+        else:
+            # No upstream remote, or the upstream fetch failed — use origin.
             print("→ Fetching from origin...")
             fetch_result = subprocess.run(
                 git_cmd + ["fetch"] + depth_args + ["origin", branch],
@@ -11042,9 +11067,6 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
             )
             upstream_exists = False
             compare_branch = f"origin/{branch}"
-        else:
-            upstream_exists = True
-            compare_branch = f"upstream/{branch}"
     else:
         # Non-default branch: compare against origin/<branch> directly.
         print("→ Fetching from origin...")
@@ -12545,8 +12567,14 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # the bad commit and the fix landing).
         pre_pull_sha = _capture_head_sha(git_cmd, PROJECT_ROOT)
         try:
+            # Merge the ref we already fetched above (→ Fetching updates...)
+            # instead of `git pull`, which performs a SECOND network fetch of
+            # the same branch (~0.5-1.5 s of redundant round-trip per update).
+            # `merge --ff-only origin/<branch>` is byte-identical in effect to
+            # `pull --ff-only origin <branch>` given the fresh tracking ref;
+            # the divergence fallback below is unchanged.
             pull_result = subprocess.run(
-                git_cmd + ["pull", "--ff-only", "origin", branch],
+                git_cmd + ["merge", "--ff-only", f"origin/{branch}"],
                 cwd=PROJECT_ROOT,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
@@ -12779,34 +12807,51 @@ def _cmd_update_impl(args, gateway_mode: bool):
         has_desktop_app = _desktop_packaged_executable(desktop_dir) is not None or _desktop_dist_exists(desktop_dir)
         if (desktop_dir / "package.json").exists() and _resolve_node_runtime_npm() and has_desktop_app:
             print("→ Checking if desktop app needs rebuilding...")
-            _desktop_build_cmd = [sys.executable, "-m", "hermes_cli.main", "desktop", "--build-only"]
-            # Capture the (very loud) Electron/vite build output into
-            # update.log instead of streaming it to the terminal. On the rare
-            # nonzero exit, retry once after waiting again for the venv — this
-            # covers a still-settling rebuild window the first wait didn't fully
-            # catch — then surface the captured tail so the failure is
-            # debuggable.
-            #
-            # Start the build subprocess with the Hermes-managed Node on PATH:
-            # when `hermes update` runs inside the desktop updater chain
-            # (Desktop → hermes-setup → hermes update), the shell PATH
-            # customizations are lost, so a bare-PATH child would fail with
-            # `node: not found` before cmd_gui can self-heal.
-            from hermes_constants import with_hermes_node_path
-
-            _build_env = with_hermes_node_path()
-            build_result = _run_logged_subprocess(_desktop_build_cmd, cwd=PROJECT_ROOT, env=_build_env)
-            if build_result.returncode != 0:
-                build_result = _run_logged_subprocess(_desktop_build_cmd, cwd=PROJECT_ROOT, env=_build_env)
-            if build_result.returncode != 0:
-                print("  ⚠ Desktop build failed (non-fatal; run `hermes desktop` to retry)")
-                tail = "\n".join((build_result.stdout or "").strip().splitlines()[-15:])
-                if tail:
-                    print(tail)
-                from hermes_constants import display_hermes_home as _dhh
-                print(f"  Full build log: {_dhh()}/logs/update.log")
-            else:
+            # Consult the content-hash stamp IN-PROCESS first. The spawned
+            # `hermes desktop --build-only` subprocess re-imports the whole
+            # CLI stack (~1-3 s) just to reach the same _desktop_build_needed
+            # check; when the stamp already says "up to date" we can skip the
+            # spawn entirely. The update path never passes --source, so the
+            # subprocess would run with source_mode=False — mirror that here.
+            # Any error in the pre-check falls through to the subprocess.
+            _skip_desktop_build = False
+            try:
+                _skip_desktop_build = not _desktop_build_needed(
+                    desktop_dir, PROJECT_ROOT, source_mode=False
+                )
+            except Exception:
+                _skip_desktop_build = False
+            if _skip_desktop_build:
                 print("  ✓ Desktop app up to date")
+            else:
+                _desktop_build_cmd = [sys.executable, "-m", "hermes_cli.main", "desktop", "--build-only"]
+                # Capture the (very loud) Electron/vite build output into
+                # update.log instead of streaming it to the terminal. On the rare
+                # nonzero exit, retry once after waiting again for the venv — this
+                # covers a still-settling rebuild window the first wait didn't fully
+                # catch — then surface the captured tail so the failure is
+                # debuggable.
+                #
+                # Start the build subprocess with the Hermes-managed Node on PATH:
+                # when `hermes update` runs inside the desktop updater chain
+                # (Desktop → hermes-setup → hermes update), the shell PATH
+                # customizations are lost, so a bare-PATH child would fail with
+                # `node: not found` before cmd_gui can self-heal.
+                from hermes_constants import with_hermes_node_path
+
+                _build_env = with_hermes_node_path()
+                build_result = _run_logged_subprocess(_desktop_build_cmd, cwd=PROJECT_ROOT, env=_build_env)
+                if build_result.returncode != 0:
+                    build_result = _run_logged_subprocess(_desktop_build_cmd, cwd=PROJECT_ROOT, env=_build_env)
+                if build_result.returncode != 0:
+                    print("  ⚠ Desktop build failed (non-fatal; run `hermes desktop` to retry)")
+                    tail = "\n".join((build_result.stdout or "").strip().splitlines()[-15:])
+                    if tail:
+                        print(tail)
+                    from hermes_constants import display_hermes_home as _dhh
+                    print(f"  Full build log: {_dhh()}/logs/update.log")
+                else:
+                    print("  ✓ Desktop app up to date")
 
         print()
         print("✓ Code updated!")
@@ -15142,7 +15187,10 @@ def cmd_dashboard(args):
             reexec_argv.append("--insecure")
         if getattr(args, "skip_build", False):
             reexec_argv.append("--skip-build")
-        env = os.environ.copy()
+        from tools.environments.local import build_subprocess_env
+        # Exact env preservation: HERMES_HOME is explicitly pinned to the
+        # machine root below — the factory must not re-inject a profile home.
+        env = build_subprocess_env(scrub_secrets=False, inherit_profile_home=False)
         # Pin the child to the machine ROOT, not the launching profile's
         # HERMES_HOME.  We must resolve the root explicitly instead of just
         # dropping HERMES_HOME: in the Docker layout the machine root is
