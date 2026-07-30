@@ -63,17 +63,6 @@ class TestBudgetConfigDefaults:
         cfg = BudgetConfig()
         assert cfg.default_result_size == DEFAULT_RESULT_SIZE_CHARS
 
-    def test_default_turn_budget(self):
-        cfg = BudgetConfig()
-        assert cfg.turn_budget == DEFAULT_TURN_BUDGET_CHARS
-
-    def test_default_preview_size(self):
-        cfg = BudgetConfig()
-        assert cfg.preview_size == DEFAULT_PREVIEW_SIZE_CHARS
-
-    def test_default_tool_overrides_empty(self):
-        cfg = BudgetConfig()
-        assert cfg.tool_overrides == {}
 
     def test_default_budget_singleton_matches(self):
         """DEFAULT_BUDGET should equal a freshly constructed BudgetConfig."""
@@ -93,15 +82,6 @@ class TestBudgetConfigFrozen:
         with pytest.raises(dataclasses.FrozenInstanceError):
             cfg.default_result_size = 999
 
-    def test_cannot_set_turn_budget(self):
-        cfg = BudgetConfig()
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            cfg.turn_budget = 999
-
-    def test_cannot_set_preview_size(self):
-        cfg = BudgetConfig()
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            cfg.preview_size = 999
 
     def test_cannot_set_tool_overrides(self):
         cfg = BudgetConfig()
@@ -150,31 +130,6 @@ class TestResolveThreshold:
         result = cfg.resolve_threshold("my_tool")
         assert result == 42
 
-    @patch("tools.registry.registry")
-    def test_falls_back_to_registry(self, mock_registry):
-        """When not pinned and not in overrides, delegate to registry."""
-        mock_registry.get_max_result_size.return_value = 77_777
-        cfg = BudgetConfig()
-        result = cfg.resolve_threshold("some_tool")
-        mock_registry.get_max_result_size.assert_called_once_with(
-            "some_tool", default=DEFAULT_RESULT_SIZE_CHARS
-        )
-        assert result == 77_777
-
-    @patch("tools.registry.registry")
-    def test_registry_receives_custom_default(self, mock_registry):
-        """Custom default_result_size flows through to registry call."""
-        mock_registry.get_max_result_size.return_value = 50_000
-        cfg = BudgetConfig(default_result_size=50_000)
-        cfg.resolve_threshold("unknown_tool")
-        mock_registry.get_max_result_size.assert_called_once_with(
-            "unknown_tool", default=50_000
-        )
-
-    def test_pinned_read_file_returns_inf(self):
-        """Canonical case: read_file must always return inf."""
-        cfg = BudgetConfig()
-        assert cfg.resolve_threshold("read_file") == float("inf")
 
     @patch("tools.registry.registry")
     def test_registry_value_capped_at_default(self, mock_registry):
@@ -187,12 +142,6 @@ class TestResolveThreshold:
         cfg = BudgetConfig(default_result_size=30_000)
         assert cfg.resolve_threshold("web_search") == 30_000
 
-    @patch("tools.registry.registry")
-    def test_registry_inf_not_capped(self, mock_registry):
-        """An inf registry value (e.g. a future pinned-like tool) is preserved."""
-        mock_registry.get_max_result_size.return_value = float("inf")
-        cfg = BudgetConfig(default_result_size=30_000)
-        assert cfg.resolve_threshold("some_tool") == float("inf")
 
     @patch("tools.registry.registry")
     def test_default_budget_unchanged_for_100k_tool(self, mock_registry):

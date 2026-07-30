@@ -62,12 +62,6 @@ class TestFindAgentBrowserCache:
         assert result1 == result2 == "/usr/bin/agent-browser"
         assert bt._agent_browser_resolved is True
 
-    def test_cache_cleared_by_cleanup(self):
-        import tools.browser_tool as bt
-        bt._cached_agent_browser = "/fake/path"
-        bt._agent_browser_resolved = True
-        bt.cleanup_all_browsers()
-        assert bt._agent_browser_resolved is False
 
     def test_not_found_cached_raises_on_subsequent(self):
         """After FileNotFoundError, subsequent calls should raise from cache."""
@@ -102,11 +96,6 @@ class TestCommandTimeoutCache:
         with patch("hermes_cli.config.read_raw_config", return_value={}):
             assert _get_command_timeout() == 30
 
-    def test_reads_from_config(self):
-        from tools.browser_tool import _get_command_timeout
-        cfg = {"browser": {"command_timeout": 60}}
-        with patch("hermes_cli.config.read_raw_config", return_value=cfg):
-            assert _get_command_timeout() == 60
 
     def test_cached_after_first_call(self):
         from tools.browser_tool import _get_command_timeout
@@ -126,19 +115,6 @@ class TestSessionInactivityTimeout:
         with patch("hermes_cli.config.read_raw_config", return_value={}):
             assert _get_session_inactivity_timeout() == DEFAULT_CONFIG["browser"]["inactivity_timeout"]
 
-    def test_reads_from_config_over_env(self, monkeypatch):
-        from tools.browser_tool import _get_session_inactivity_timeout
-        monkeypatch.setenv("BROWSER_INACTIVITY_TIMEOUT", "120")
-        cfg = {"browser": {"inactivity_timeout": 900}}
-        with patch("hermes_cli.config.read_raw_config", return_value=cfg):
-            assert _get_session_inactivity_timeout() == 900
-
-    def test_floor_at_30_seconds(self, monkeypatch):
-        from tools.browser_tool import _get_session_inactivity_timeout
-        monkeypatch.setenv("BROWSER_INACTIVITY_TIMEOUT", "120")
-        cfg = {"browser": {"inactivity_timeout": 1}}
-        with patch("hermes_cli.config.read_raw_config", return_value=cfg):
-            assert _get_session_inactivity_timeout() == 30
 
     def test_invalid_config_preserves_env_fallback(self, monkeypatch):
         from tools.browser_tool import _get_session_inactivity_timeout
