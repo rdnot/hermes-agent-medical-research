@@ -129,6 +129,7 @@ export const zh: Translations = {
     errors: {
       elevenLabsNeedsKey: 'ElevenLabs STT 需要 ELEVENLABS_API_KEY。',
       elevenLabsRejectedKey: 'ElevenLabs 拒绝了该 API key (401)。',
+      diskFull: '磁盘已满 — 请腾出一些空间后再试。',
       gatewayAuthFailed: '网关认证失败 — 请检查你的 API_SERVER_KEY。',
       methodNotAllowed: '桌面后端拒绝了该请求 (405 Method Not Allowed)。请尝试重启 Hermes Desktop。',
       microphonePermission: '麦克风权限已被拒绝。',
@@ -3114,5 +3115,5 @@ export const zh: Translations = {
       description: '显示移动端侧边栏。',
       toggle: open => `${open ? '显示' : '隐藏'}侧边栏`
     }
-  },
+  }
 }
