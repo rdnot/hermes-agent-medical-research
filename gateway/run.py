@@ -2206,6 +2206,7 @@ from gateway.config import (
     _BUILTIN_PLATFORM_VALUES,
     GatewayConfig,
     PlatformConfig,
+    _getenv,
     load_gateway_config,
 )
 from gateway.session import (
@@ -2295,11 +2296,11 @@ def _own_policy_open_startup_violation(config) -> Optional[str]:
         extra = getattr(platform_config, "extra", None) or {}
         dm_policy = str(
             extra.get("dm_policy")
-            or (os.getenv(dm_env, "pairing") if dm_env else "pairing")
+            or (_getenv(dm_env, "pairing") if dm_env else "pairing")
         ).strip().lower()
         group_policy = str(
             extra.get("group_policy")
-            or (os.getenv(group_env, "pairing") if group_env else "pairing")
+            or (_getenv(group_env, "pairing") if group_env else "pairing")
         ).strip().lower()
         if dm_policy != "open" and group_policy != "open":
             continue
@@ -2308,7 +2309,7 @@ def _own_policy_open_startup_violation(config) -> Optional[str]:
         ).lower() in {"true", "1", "yes"}
         platform_opted_in = gateway_allow_all or (
             allow_all_env
-            and os.getenv(allow_all_env, "").lower() in {"true", "1", "yes"}
+            and _getenv(allow_all_env, "").lower() in {"true", "1", "yes"}
         )
         if platform_opted_in:
             continue
@@ -11517,9 +11518,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             dest_chat_type = "dm"
             dest_user_id = home_chat_id if is_telegram_private_chat else "system:handoff"
 
+        # Discord thread destinations must key on the thread's OWN id, not the
+        # parent channel's, because the Discord adapter builds organic in-thread
+        # messages with ``chat_id == thread id`` — so ``build_session_key``
+        # yields ``…:thread:{thread}:{thread}``. If the handoff keys on the
+        # parent channel (``…:thread:{parent}:{thread}``) the next real user
+        # reply in the thread resolves to a DIFFERENT session_key and spawns a
+        # fresh session instead of continuing the handed-off one.
+        #
+        # This is Discord-specific: Slack and Telegram adapters key organic
+        # thread messages with ``chat_id == parent_channel`` and the thread
+        #/topic id only in ``thread_id``, so for those platforms the parent
+        # channel is correct (and the deeper chat_type normalization — handoff
+        # uses "thread" but Slack organic uses "group" — is a separate issue).
+        if platform == Platform.DISCORD and dest_chat_type == "thread" and effective_thread_id:
+            dest_chat_id = str(effective_thread_id)
+        else:
+            dest_chat_id = home_chat_id
         dest_source = SessionSource(
             platform=platform,
-            chat_id=home_chat_id,
+            chat_id=dest_chat_id,
             chat_name=home.name,
             chat_type=dest_chat_type,
             user_id=dest_user_id,
@@ -20581,6 +20599,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             message_id=str(context.source.message_id) if context.source.message_id else "",
             profile=getattr(context.source, "profile", "") or "",
             async_delivery=_async_delivery,
+            cron_session="",
         )
 
     def _clear_session_env(self, tokens: list) -> None:
@@ -23073,7 +23092,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "tools": [],
             }
 
-        proxy_key = os.getenv("GATEWAY_PROXY_KEY", "").strip()
+        # Scope-aware read: the proxy key is a per-profile credential; under
+        # multiplex honor the installed scope's verdict (Slack pattern for
+        # the unscoped default-profile loop).
+        try:
+            from agent.secret_scope import UnscopedSecretError, get_secret
+
+            try:
+                proxy_key = (get_secret("GATEWAY_PROXY_KEY") or "").strip()
+            except UnscopedSecretError:
+                proxy_key = os.getenv("GATEWAY_PROXY_KEY", "").strip()
+        except Exception:
+            proxy_key = os.getenv("GATEWAY_PROXY_KEY", "").strip()
 
         def _run_still_current() -> bool:
             if run_generation is None or not session_key:
@@ -25306,6 +25336,7 @@ def _start_gateway_housekeeping(stop_event: threading.Event, adapters=None, loop
     PASTE_SWEEP_EVERY = 60   # ticks — once per hour
     CURATOR_EVERY = 60       # ticks — poll hourly (inner gate handles the real cadence)
     AUTO_ARCHIVE_EVERY = 60  # ticks — poll hourly (state_meta gate owns the real cadence)
+    MEMORY_TRIM_EVERY = 1    # shared helper cooldown bounds actual allocator work
 
     # Every platform media cache prunes on the same hourly cadence — one loop
     # over (name, cleanup_fn), not a copy-pasted try/except per cache.
@@ -25413,6 +25444,25 @@ def _start_gateway_housekeeping(stop_event: threading.Event, adapters=None, loop
                         _adb.close()
             except Exception as e:
                 logger.debug("Auto-archive tick error: %s", e)
+
+        # This is the long-lived messaging-gateway counterpart to the TUI idle
+        # reaper. The helper is config-gated and rate-limited, so calling it on
+        # the 60s housekeeping cadence does not create a trim storm.
+        if tick_count % MEMORY_TRIM_EVERY == 0:
+            try:
+                from hermes_cli.mem_trim import trim_memory
+
+                trim_memory(reason="messaging gateway housekeeping")
+            except Exception as exc:
+                # debug, not warning: sibling housekeeping branches all log
+                # failures at debug, and a persistent failure (e.g. broken
+                # import after a partial update) would otherwise warn every
+                # 60s forever.
+                logger.debug(
+                    "gateway housekeeping memory trim failed: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
 
         stop_event.wait(timeout=interval)
     logger.info("Gateway housekeeping stopped")
