@@ -841,7 +841,7 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
     if HAS_CURL_CPERF and not is_reddit and not is_pubmed:
         try:
             logger.debug("Fetching with curl_cffi: %s", url)
-            resp = curl_requests.get(url, timeout=timeout, impersonate="chrome120")
+            resp = curl_requests.get(url, timeout=timeout, impersonate="chrome")
             curl_cffi_status = resp.status_code
             curl_cffi_content = resp.content
             if resp.status_code < 400 and _is_content_sufficient(resp.content, url):
@@ -1046,12 +1046,8 @@ async def _fetch_jina(url: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
             title = data.get("title", "")
         if not text:
             return None
-        max_chars = 400000  # Match hermes max_tool_result_chars
-        if len(text) > max_chars:
-            truncated = text[:max_chars]
-            last_para_end = max(truncated.rfind('\n\n'), truncated.rfind('\r\n\r\n'))
-            if last_para_end > max_chars * 0.9:
-                text = truncated[:last_para_end] + "\n\n[...truncated...]"
+        # NOTE: No inline truncation — web_extract_tool's _truncate_with_footer()
+        # handles head+tail + disk-storage uniformly for all results.
         return {
             "url": url,
             "title": title,
@@ -1144,16 +1140,13 @@ async def _fetch_and_process_locally(url: str, timeout: int = 60) -> Optional[Di
     
     # Extract readable text
     text = _html_to_text(html, url)
-    
-    # Smart truncation (paragraph-aware)
-    max_chars = 400000  # Match hermes max_tool_result_chars
-    if len(text) > max_chars:
-        # Truncate at paragraph boundary
-        truncated = text[:max_chars]
-        last_para_end = max(truncated.rfind('\n\n'), truncated.rfind('\r\n\r\n'))
-        if last_para_end > max_chars * 0.9:  # Only if we're close to the limit
-            text = truncated[:last_para_end] + "\n\n[...truncated...]"
-    
+
+    # NOTE: No inline truncation here. web_extract_tool runs _truncate_with_footer()
+    # on ALL results (local + cloud) after this returns. Pre-truncating here would
+    # (1) discard the tail before _truncate_with_footer can include it in the
+    # head+tail window, and (2) suppress the disk-storage + read_file footer path
+    # (because _truncate_with_footer sees len <= char_limit → was_truncated=False).
+    # Return the full extracted text and let the unified truncation handle it.
     return {
         "url": url,
         "title": title,
