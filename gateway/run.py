@@ -63,7 +63,7 @@ from agent.interrupt_compat import request_hard_interrupt
 from agent.turn_context import (
     compression_made_progress,
 )
-from hermes_cli.config import cfg_get
+from hermes_cli.config import _is_ssh_remote_tilde_cwd, cfg_get
 from hermes_cli.fallback_config import get_fallback_chain
 
 # --- Agent cache tuning ---------------------------------------------------
@@ -2130,7 +2130,6 @@ if _config_path.exists():
                     # to the Hermes host/container HOME (often /opt/data). Shared
                     # predicate with terminal_tool so the two sites can't drift.
                     if _cfg_key == "cwd" and isinstance(_val, str):
-                        from tools.terminal_tool import _is_ssh_remote_tilde_cwd
                         if not _is_ssh_remote_tilde_cwd(_terminal_backend, _val.strip()):
                             _val = os.path.expanduser(_val)
                     if isinstance(_val, (list, dict)):
@@ -3489,8 +3488,33 @@ def _normalize_empty_agent_response(
         return response
 
     if agent_result.get("failed"):
-        error_detail = agent_result.get("error", "unknown error")
+        # None-safe: the gateway result dict is built with
+        # ``'error': holder.get('error')`` and can carry an EXPLICIT None,
+        # which bypasses dict.get's default and would render
+        # "The request failed: None".
+        error_detail = agent_result.get("error") or "unknown error"
         error_str = str(error_detail).lower()
+        # Session-persistence failures get a dedicated recovery message.
+        # Suggesting /reset here would be actively harmful: it destroys the
+        # user's conversation context and does nothing to fix the underlying
+        # storage problem (lock contention, disk exhaustion, ...).
+        failure_reason = str(agent_result.get("failure_reason") or "")
+        if failure_reason.startswith("session_persistence_failed") or (
+            "session storage" in error_str
+        ):
+            if failure_reason.endswith(":disk") or "disk" in error_str:
+                return (
+                    "⚠️ Session storage was temporarily unavailable, so this "
+                    "turn was stopped to protect your conversation history. "
+                    "Please check available disk space, then send your "
+                    "message again."
+                )
+            return (
+                "⚠️ Session storage was temporarily unavailable, so this "
+                "turn was stopped to protect your conversation history. "
+                "Your message should already be saved — please send it "
+                "again in a moment."
+            )
         is_context_failure = any(
             p in error_str
             for p in ("context", "token", "too large", "too long", "exceed", "payload")
@@ -18113,6 +18137,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             await self.hooks.emit("agent:end", {
                 **hook_ctx,
                 "response": (response or "")[:500],
+                "model": agent_result.get("model", ""),
+                "provider": agent_result.get("provider", ""),
             })
             
             # Check for pending process watchers (check_interval on background processes)
@@ -21844,9 +21870,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         from agent.memory_manager import sanitize_context
 
         analysis_prompt = (
-            "Describe everything visible in this image in thorough detail. "
-            "Include any text, code, data, objects, people, layout, colors, "
-            "and any other notable visual information."
+            "Concisely describe this image in 2-4 sentences "
+            "(~200 Chinese characters or ~150 English words). "
+            "Cover the main subject, key visible text/data/code, and overall context. "
+            "If it is a chart, diagram, or scientific figure, include the important "
+            "labels, legend, and key values. Skip decorative details."
         )
 
         enriched_parts = []
