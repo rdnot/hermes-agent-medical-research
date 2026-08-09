@@ -65,9 +65,9 @@
 
 - **Tell Hermes to** : do a security analysis of this fork codes ( https://github.com/rdnot/hermes-agent-medical-research/ )
 
-- **Tell Hermes to** : pull this fork into your Hermes agent local repo ( https://github.com/rdnot/hermes-agent-medical-research/ )
+- **Tell Hermes to** : Point your Hermes agent local repo origin to https://github.com/rdnot/hermes-agent-medical-research/
 
-- **Restart Hermes agent** : `/exit` then `hermes --tui` (in CLI), `/restart` (in messaging app)
+- **Exit Hermes agent and pull update from this fork** : `/exit` then `hermes update`
 
 - **Tell Hermes to** : set SOUL.md to
 ```
