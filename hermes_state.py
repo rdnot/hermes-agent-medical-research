@@ -4019,6 +4019,16 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         returning ``None`` mints a brand-new session id, which is a worse
         outcome than resuming an empty-but-correctly-keyed row (and "empty"
         may just mean the transcript lives under a compression child).
+
+        Reset boundaries fence recovery (#68539): an intentional boundary
+        such as ``session_reset`` (or any explicit non-recoverable
+        end_reason) must block fallback to an *older* row for the same
+        peer. Without the fence, the has-messages ranking above could reach
+        behind a /new reset and silently restore the exact context the user
+        reset. Each candidate is therefore rejected when a boundary row for
+        the peer ended *after* the candidate's last activity — if the
+        conversation's most recent event is an intentional reset, recovery
+        returns nothing rather than reaching behind it.
         """
         if not session_key:
             return None
@@ -4036,6 +4046,17 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 WHERE s.session_key = ?
                   AND s.source = ?
                   AND (s.ended_at IS NULL OR s.end_reason IN ('agent_close', 'ws_orphan_reap'))
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sessions b
+                      WHERE b.session_key = s.session_key
+                        AND b.source = s.source
+                        AND b.ended_at IS NOT NULL
+                        AND b.end_reason IN ('session_reset', 'session_switch',
+                                             'idle', 'daily', 'suspended',
+                                             'resume_pending_expired')
+                        AND b.ended_at
+                            > COALESCE(s.last_activity_at, s.started_at)
+                  )
                 ORDER BY _has_messages DESC,
                          COALESCE(s.last_activity_at, s.started_at) DESC
                 LIMIT 1
@@ -4069,6 +4090,20 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                   AND (COALESCE(s.message_count, 0) > 0 OR EXISTS (
                       SELECT 1 FROM messages WHERE messages.session_id = s.id LIMIT 1
                   ))
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sessions b
+                      WHERE b.source = s.source
+                        AND COALESCE(b.user_id, '') = COALESCE(s.user_id, '')
+                        AND COALESCE(b.chat_id, '') = COALESCE(s.chat_id, '')
+                        AND COALESCE(b.chat_type, '') = COALESCE(s.chat_type, '')
+                        AND COALESCE(b.thread_id, '') = COALESCE(s.thread_id, '')
+                        AND b.ended_at IS NOT NULL
+                        AND b.end_reason IN ('session_reset', 'session_switch',
+                                             'idle', 'daily', 'suspended',
+                                             'resume_pending_expired')
+                        AND b.ended_at
+                            > COALESCE(s.last_activity_at, s.started_at)
+                  )
                 ORDER BY COALESCE(s.last_activity_at, s.started_at) DESC
                 LIMIT 1
                 """,
@@ -7939,6 +7974,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         session_id: str,
         messages: List[Dict[str, Any]],
         active_only: bool = False,
+        archive_dropped: bool = False,
     ) -> None:
         """Atomically replace the stored messages for a session.
 
@@ -7959,6 +7995,20 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         full-history rewrite doesn't wipe the rows the agent deliberately
         archived. ``message_count``/``tool_call_count`` then track the live set,
         matching :meth:`archive_and_compact`.
+
+        Pass ``archive_dropped=True`` to SOFT-archive the live rows instead of
+        DELETEing them: the replaced turns stay on disk with ``active = 0``,
+        ``compacted = 0`` — the same "the user took it back" marking
+        :meth:`rewind_to_message` applies — and stay readable via
+        :meth:`get_messages` with ``include_inactive=True``. This is the mode a
+        rewind/edit/regenerate must use: those flows overwrite a transcript the
+        user may not have meant to drop, and a plain DELETE also evicts the rows
+        from the FTS index, leaving nothing to recover from (#82756). It implies
+        active-only handling — already-archived rows are never touched — so
+        ``active_only`` is redundant with it. The rewritten set is inserted as
+        fresh active rows exactly as in the destructive path, so the live view
+        is identical either way; only the durability of the dropped turns
+        differs.
         """
 
         active_clause = " AND active = 1" if active_only else ""
@@ -7974,10 +8024,22 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 and session["end_reason"] == "compression"
             ):
                 raise CompressionSessionClosedError(session_id)
-            conn.execute(
-                f"DELETE FROM messages WHERE session_id = ?{active_clause}",
-                (session_id,),
-            )
+            if archive_dropped:
+                # Content-preserving UPDATE: the rows keep their FTS entries
+                # (the messages_fts triggers fire on INSERT / DELETE / UPDATE
+                # of content columns, not on `active`), so the replaced turns
+                # stay readable via get_messages(include_inactive=True) and
+                # searchable with include_inactive=True after the rewrite.
+                conn.execute(
+                    "UPDATE messages SET active = 0 "
+                    "WHERE session_id = ? AND active = 1",
+                    (session_id,),
+                )
+            else:
+                conn.execute(
+                    f"DELETE FROM messages WHERE session_id = ?{active_clause}",
+                    (session_id,),
+                )
             conn.execute(
                 "UPDATE sessions SET message_count = 0, tool_call_count = 0 WHERE id = ?",
                 (session_id,),
