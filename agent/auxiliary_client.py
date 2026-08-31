@@ -62,6 +62,13 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, TYPE_CHECKING
 from urllib.parse import urlparse, parse_qs, urlunparse
 
+from agent.codex_headers import (
+    CODEX_AUX_BASE_URL as _CODEX_AUX_BASE_URL,
+    apply_required_codex_headers as _apply_required_codex_headers,
+    codex_cloudflare_headers as _codex_cloudflare_headers,
+    is_official_codex_base_url as _is_official_codex_base_url,
+)
+
 # NOTE: `from openai import OpenAI` is deliberately NOT at module top — the
 # openai SDK pulls a large type tree (~240 ms cold, including responses/*,
 # graders/*). We expose `OpenAI` here as a thin proxy that imports the SDK on
@@ -1326,89 +1333,10 @@ _NOUS_DEFAULT_BASE_URL = "https://inference-api.nousresearch.com/v1"
 _ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
 _AUTH_JSON_PATH = get_hermes_home() / "auth.json"
 
-# Codex OAuth endpoint used when a caller explicitly requests
-# provider="openai-codex".  There is deliberately no hardcoded default
-# model: the set of models OpenAI accepts on this endpoint for
-# ChatGPT-account auth is an undocumented, shifting allow-list, and
-# pinning one here has drifted silently twice (gpt-5.3-codex → gpt-5.2-codex
-# → gpt-5.4 over 6 weeks in early 2026).  Callers must pass the model
-# they want explicitly (from config.yaml model.model, auxiliary.<task>.model,
-# or the user's active Codex model selection).
-_CODEX_AUX_BASE_URL = "https://chatgpt.com/backend-api/codex"
-
-
-def _is_official_codex_base_url(base_url: str) -> bool:
-    """Identify OpenAI's Codex endpoint without matching custom proxies."""
-    try:
-        parsed = urlparse(base_url)
-        path = parsed.path.rstrip("/")
-        return (
-            parsed.scheme == "https"
-            and parsed.hostname == "chatgpt.com"
-            and parsed.port in (None, 443)
-            and (path == "/backend-api/codex" or path.startswith("/backend-api/codex/"))
-        )
-    except (TypeError, ValueError):
-        return False
-
-
-def _codex_cloudflare_headers(
-    access_token: str, *, base_url: str = _CODEX_AUX_BASE_URL,
-) -> Dict[str, str]:
-    """Identity and account headers for chatgpt.com/backend-api/codex.
-
-    OpenAI requires third-party harnesses to identify themselves. Requests to
-    the official endpoint always send Hermes' originator and version. Custom
-    endpoints retain the existing compatibility identity. In either case,
-    preserve ``ChatGPT-Account-ID`` from the OAuth JWT's
-    ``chatgpt_account_id`` claim.
-
-    Malformed tokens are tolerated — we drop the account-ID header rather than
-    raise, so a bad token still surfaces as an auth error (401) instead of a
-    crash at client construction.
-    """
-    headers = {
-        "User-Agent": "codex_cli_rs/0.0.0 (Hermes Agent)",
-        "originator": "codex_cli_rs",
-    }
-    if _is_official_codex_base_url(base_url):
-        from hermes_cli import __version__
-
-        headers.update({
-            "User-Agent": f"HermesAgent/{__version__}",
-            "originator": "hermes-agent",
-        })
-    if not isinstance(access_token, str) or not access_token.strip():
-        return headers
-    try:
-        import base64
-        parts = access_token.split(".")
-        if len(parts) < 2:
-            return headers
-        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(payload_b64))
-        acct_id = claims.get("https://api.openai.com/auth", {}).get("chatgpt_account_id")
-        if isinstance(acct_id, str) and acct_id:
-            headers["ChatGPT-Account-ID"] = acct_id
-    except Exception:
-        pass
-    return headers
-
-
-def _apply_required_codex_headers(
-    client_kwargs: Dict[str, Any], *, access_token: str, base_url: str,
-) -> None:
-    """Keep required Codex identity after user/provider header overrides."""
-    if not _is_official_codex_base_url(base_url):
-        return
-    required = _codex_cloudflare_headers(access_token, base_url=base_url)
-    required_names = {name.lower() for name in required}
-    existing = client_kwargs.get("default_headers") or {}
-    client_kwargs["default_headers"] = {
-        **{name: value for name, value in existing.items()
-           if str(name).lower() not in required_names},
-        **required,
-    }
+# Codex helpers live in a small leaf module so fresh client builders never
+# request newly added exports from a stale, long-lived auxiliary router. The
+# private aliases above preserve the established import surface for plugins and
+# tests while new production consumers import the leaf directly.
 
 
 # Hosts that expose BOTH an Anthropic-style ``…/anthropic`` path and a sibling
@@ -9535,6 +9463,7 @@ class _ChatStreamAccumulator:
         self._total_ceiling = total_ceiling
         self.content_parts: List[str] = []
         self.reasoning_parts: List[str] = []
+        self.reasoning_details: List[Any] = []
         self.tool_calls_acc: Dict[int, Dict[str, Any]] = {}
         self.finish_reason = None
         self.usage = None
@@ -9579,6 +9508,24 @@ class _ChatStreamAccumulator:
         if reasoning_piece and isinstance(reasoning_piece, str):
             self.reasoning_parts.append(reasoning_piece)
             made_progress = True
+        # OpenRouter-compatible reasoning models may stream their entire
+        # thinking phase through ``reasoning_details`` instead of
+        # ``reasoning`` / ``reasoning_content``.  Treat only details carrying
+        # actual text as forward progress: structural/signed envelopes must
+        # not keep an otherwise stalled compression alive indefinitely.
+        reasoning_details = getattr(delta, "reasoning_details", None)
+        if reasoning_details is None:
+            model_extra = getattr(delta, "model_extra", None)
+            if isinstance(model_extra, dict):
+                reasoning_details = model_extra.get("reasoning_details")
+        if isinstance(reasoning_details, list):
+            for detail in reasoning_details:
+                self.reasoning_details.append(detail)
+                if isinstance(detail, dict) and any(
+                    isinstance(detail.get(field), str) and detail[field]
+                    for field in ("summary", "thinking", "content", "text")
+                ):
+                    made_progress = True
         for tc in (getattr(delta, "tool_calls", None) or []):
             idx = getattr(tc, "index", 0) or 0
             acc = self.tool_calls_acc.setdefault(
@@ -9620,6 +9567,7 @@ class _ChatStreamAccumulator:
             content="".join(self.content_parts),
             tool_calls=tool_calls,
             reasoning="".join(self.reasoning_parts) or None,
+            reasoning_details=self.reasoning_details or None,
         )
         choice = SimpleNamespace(
             index=0,
