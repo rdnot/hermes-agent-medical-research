@@ -9,6 +9,7 @@ caching, keyless rescue, and the truncate-and-store result pipeline.
 Debug: ``WEB_TOOLS_DEBUG=true`` writes ``logs/web_tools_debug_<UUID>.json``.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -57,7 +58,7 @@ from plugins.web.firecrawl.provider import _is_tool_gateway_ready, check_firecra
 from tools.debug_helpers import DebugSession
 from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, selection_exists
 from tools.url_safety import async_is_safe_url
-from tools.web_tools_rescue import _rescue_eligible, _rescue_search
+from tools.web_tools_rescue import _rescue_eligible, _rescue_extract, _rescue_search
 from tools.web_tools_truncate import _effective_char_limit, _trim_results, _truncate_results, convert_base64_images_to_links
 from tools.web_tools_extract import (
     _extract_safe_urls, _merge_in_order, _no_provider_error, _resolve_extract_provider, _result_entry,
