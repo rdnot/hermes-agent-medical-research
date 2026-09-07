@@ -1190,6 +1190,8 @@ The **stale non-stream detection** kills non-streaming calls that produce no res
 
 This budget bounds every non-streaming call. A provider that accepts a request and then goes silent — connection held open, no bytes, no error — is aborted at the stale timeout and retried, rather than hanging until the much longer socket read timeout (or, for an unattended cron run, until something external kills the process).
 
+The Codex Responses **waiting status** describes silence, not total generation time: active stream events (including reasoning) keep it quiet. If events stop, it reports time without stream events instead of claiming no response has arrived; the notice clears when events resume. When a reconnect starts a fresh first-event watchdog phase, the waiting status follows that phase. This display behavior does not extend the separate wall-clock stale-call budget or change watchdog timeouts. Chat-completion streams likewise clear their silence warning promptly when chunks resume, without replacing a local model-loading status.
+
 Cron jobs and delegated subagents stream too. They run the request inline on their own thread (the interrupt worker other sessions use wedges inside the gateway's nested thread pools), but the wire request is still `stream: true`, so the **stale stream detection** budget above governs them — every token counts as liveness, so a reasoning model that thinks for minutes is not mistaken for a hung provider, and edge proxies that kill silent connections keep seeing bytes.
 
 ### Disabling API streaming
@@ -2664,6 +2666,7 @@ delegation:
   # base_url: "http://localhost:1234/v1"    # Direct OpenAI-compatible endpoint (takes precedence over provider)
   # api_key: "local-key"                    # API key for base_url (falls back to OPENAI_API_KEY)
   # api_mode: ""                            # Wire protocol for base_url: "chat_completions", "codex_responses", or "anthropic_messages". Empty = auto-detect from URL (e.g. /anthropic suffix → anthropic_messages). Set explicitly for non-standard endpoints the heuristic can't detect.
+  compression_threshold_tokens: 0          # Optional absolute cap on a subagent's compaction trigger (>= 16000); 0 = off, children use the ratio threshold
   # request_overrides:                      # Per-child request settings sent on every subagent API call (all resolution branches).
   #   extra_body:                           # Merged into the request's extra_body — e.g. OpenRouter routing hints:
   #     provider:
