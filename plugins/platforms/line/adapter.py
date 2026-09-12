@@ -596,7 +596,8 @@ class LineAdapter(BasePlatformAdapter):
                 return
 
         source_obj = self.build_source(
-            chat_id=chat_id, chat_type=chat_type, user_id=user_id, user_name=user_id, chat_name=chat_id)
+            chat_id=chat_id, chat_type=chat_type, user_id=user_id, user_name=user_id, chat_name=chat_id,
+            message_id=message_id)
         await self.handle_message(MessageEvent(
             text=text, message_type=_LINE_MESSAGE_TYPES.get(msg_type, MessageType.TEXT), source=source_obj,
             raw_message=event, message_id=message_id, media_urls=media_urls, media_types=media_types))
