@@ -233,9 +233,11 @@ class TestTruncateSnapshot:
     def test_threshold_aligned_with_web_extract_budget(self):
         """Snapshot and web_extract share the truncate-and-store pattern —
         the per-page budget the model sees must stay aligned between them."""
-        from tools.browser_tool import SNAPSHOT_SUMMARIZE_THRESHOLD
-        from tools.web_tools import DEFAULT_EXTRACT_CHAR_LIMIT
-        assert SNAPSHOT_SUMMARIZE_THRESHOLD == DEFAULT_EXTRACT_CHAR_LIMIT
+        # Import base-body names, not plugin-compat aliases (SNAPSHOT_SUMMARIZE_THRESHOLD
+        # in browser_tool.py is a compat-only alias of DEFAULT_SNAPSHOT_THRESHOLD).
+        from tools.browser_tool import DEFAULT_SNAPSHOT_THRESHOLD
+        from tools.web_tools_truncate import DEFAULT_EXTRACT_CHAR_LIMIT
+        assert DEFAULT_SNAPSHOT_THRESHOLD == DEFAULT_EXTRACT_CHAR_LIMIT
 
     def test_truncation_stores_full_snapshot_and_points_to_it(self):
         """Truncated snapshots save the complete text to cache/web (like web_extract)."""
