@@ -358,7 +358,7 @@ export function useGatewayBoot({
     }
 
     const attemptReconnect = async (manual?: { profile: string; activationEpoch: number }) => {
-      if (cancelled || reconnecting || gatewayOpen() || $gatewaySwitching.get()) {
+      if (cancelled || primaryReauthError || reconnecting || gatewayOpen() || $gatewaySwitching.get()) {
         return
       }
 
@@ -481,7 +481,7 @@ export function useGatewayBoot({
       } finally {
         reconnecting = false
 
-        if (!cancelled && !gatewayOpen() && !$gatewaySwitching.get()) {
+        if (!cancelled && !primaryReauthError && !gatewayOpen() && !$gatewaySwitching.get()) {
           if (reconnectFailingSince === null) {
             reconnectFailingSince = Date.now()
           }
@@ -509,7 +509,7 @@ export function useGatewayBoot({
     }
 
     function scheduleReconnect(manual?: { profile: string; activationEpoch: number }) {
-      if (cancelled || reconnecting || reconnectTimer !== null || gatewayOpen() || $gatewaySwitching.get()) {
+      if (cancelled || primaryReauthError || reconnecting || reconnectTimer !== null || gatewayOpen() || $gatewaySwitching.get()) {
         return
       }
 
@@ -1014,13 +1014,16 @@ export function useGatewayBoot({
       if (!isActivePrimary()) {
         activeGateway()?.close()
 
-        if (!(await ensureActiveGatewayOpen())) {
+        if (!(await ensureActiveGatewayOpen({ explicit: true }))) {
           throw new Error('Hermes gateway is not connected')
         }
 
         return
       }
 
+      // Only explicit recovery may retry a credential that requires sign-in.
+      primaryReauthError = null
+      reauthNotified = false
       gateway.close()
       clearReconnectTimer()
       reconnectAttempt = 0
