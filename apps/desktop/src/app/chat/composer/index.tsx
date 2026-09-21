@@ -7,7 +7,6 @@ import { useHudComposerDrag } from '@/app/hud/composer-drag'
 import { composerFloatingStrip, composerInputBacking } from '@/components/chat/composer-dock'
 import { $chatOnboardingSolo, $chatOnboardingThreadIds } from '@/components/onboarding-chat/assembly'
 import { OnboardingSkip } from '@/components/onboarding-chat/skip'
-import { OnboardingStart } from '@/components/onboarding-chat/start'
 import { Button } from '@/components/ui/button'
 import { Slot as ContribSlot } from '@/contrib/react/slot'
 import { useI18n } from '@/i18n'
@@ -544,6 +543,15 @@ export function ChatBar({
     recordUndoPoint({ coalesce: inputType === 'insertText' || inputType === 'deleteContentBackward' })
   }
 
+  // Cut never reaches the handler above: React's onBeforeInput is a
+  // keypress/textInput polyfill and does not observe the native
+  // `beforeinput` event, so Chromium's deleteByCut input type is invisible to
+  // it. The native `cut` clipboard event still fires before the DOM mutation,
+  // which is where the pre-edit snapshot has to be banked or ⌘Z skips the cut.
+  const handleCut = () => {
+    recordUndoPoint()
+  }
+
   const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {
     const imageBlobs = extractClipboardImageBlobs(event.clipboardData)
 
@@ -1029,7 +1037,7 @@ export function ChatBar({
     handleDrop,
     handleInputDragOver,
     handleInputDrop
-  } = useComposerDrop({ cwd, insertInlineRefs, onAttachDroppedItems, requestMainFocus })
+  } = useComposerDrop({ cwd, insertInlineRefs, onAttachDroppedItems, recordUndoPoint, requestMainFocus })
 
   // A bot chat is a companion conversation, not a working session, so it has no
   // repo to speak of — see the blank repoPath handed to CodingStatusRow below.
@@ -1179,6 +1187,7 @@ export function ChatBar({
           // hint would sit behind the preedit text the whole time (#75960).
           beginComposerComposition(event.currentTarget)
         }}
+        onCut={handleCut}
         onDragOver={handleInputDragOver}
         onDrop={handleInputDrop}
         onFocus={() => markActiveComposer(scope.target)}
@@ -1284,7 +1293,6 @@ export function ChatBar({
             <ActionBadges sessionId={statusSessionId} />
             <SuggestionPills sessionId={statusSessionId} />
             <OnboardingSkip />
-            <OnboardingStart />
           </div>
           {/* Session-scoped status stack (todos, subagents, background tasks,
               queue). An in-flow dock child: the dock is bottom-anchored, so it
@@ -1485,6 +1493,11 @@ export function ChatBar({
                       <ContribSlot area={COMPOSER_AREAS.leading} />
                     </div>
                     <div className="min-w-0 [grid-area:input]">{input}</div>
+                    {/* `justify-end` packs contributed actions and the send cluster
+                      together on the right. The cluster must not carry its own
+                      `ml-auto`: in the stacked layout the auto margin absorbs the
+                      row's free space and pins a contributed action to the row
+                      start, detached from the cluster (#116332). */}
                     <div className="flex min-w-0 items-center justify-end gap-(--composer-control-gap) [grid-area:controls]">
                       <ContribSlot area={COMPOSER_AREAS.actions} />
                       {controls}
