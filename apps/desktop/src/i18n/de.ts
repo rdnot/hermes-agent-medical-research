@@ -2053,6 +2053,8 @@ export const deOverrides = {
       provider: 'Anbieter',
       model: 'Modell',
       applying: 'Wird angewendet…',
+      mainAppliedTitle: 'Hauptmodell aktualisiert',
+      mainAppliedMessage: model => `Neue Sitzungen verwenden ${model}.`,
       defaultsLabel: 'Voreinstellungen',
       reasoning: 'Denken',
       reasoningOff: 'Aus',
@@ -4384,6 +4386,7 @@ export const deOverrides = {
     goalWaiting: 'Ziel wartet',
     subagents: count => `${count} Subagent${count === 1 ? '' : 'en'}`,
     todos: (done, total) => `Aufgaben ${done}/${total}`,
+    previousTodos: (done, total) => `Frühere Aufgaben ${done}/${total}`,
     running: 'Läuft',
     stop: 'Stopp',
     dismiss: 'Verwerfen',
@@ -5464,9 +5467,9 @@ export const deOverrides = {
             `${provider} hat einen Serverfehler zurückgegeben. Versuchen Sie es gleich erneut oder wechseln Sie den Anbieter.`
         },
         timeout: {
-          title: 'Die Antwort hat zu lange gebraucht',
+          title: 'Der KI-Dienst ist nicht erreichbar',
           body: provider =>
-            `${provider} hat nicht rechtzeitig geantwortet. Versuchen Sie es erneut, um die Nachricht noch einmal zu senden.`
+            `${provider} war nicht erreichbar oder hat nicht rechtzeitig geantwortet. Prüfen Sie Ihre Internetverbindung und versuchen Sie es erneut.`
         },
         stream_drop: {
           title: 'Die Antwort wurde abgebrochen',
