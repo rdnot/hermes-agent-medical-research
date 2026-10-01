@@ -257,6 +257,21 @@ piper = [
   "piper-tts==1.8.0; (platform_machine != 'ARM64' or sys_platform != 'win32') and (platform_machine != 'x86_64' or sys_platform != 'darwin')",
 ]
 modal = ["modal==1.5.5"]
+# Fork (medical-research): local tiered fetcher for web_extract's "local" backend
+# (tools/web_tools.py): curl_cffi (Chrome TLS impersonation), Scrapling + its
+# [fetchers] browser stack (stealth Chromium for JS/Cloudflare/PubMed pages),
+# trafilatura (HTML -> text) and PyMuPDF (PDF -> text). Not upstream deps: without
+# this extra the fetcher degrades silently to httpx-only. Installed on demand by
+# PM (lazy_ensure in web_tools) the first time extract_backend=local is used, and
+# recorded in the PM ledger so every later venv rebuild keeps it. Exact-pinned per
+# the house rule; bump together with `hermes pm lock`. The Chromium build patchright
+# needs is a per-machine step: `python -m patchright install chromium`.
+web-local = [
+  "curl_cffi==0.16.3",
+  "scrapling[fetchers]==0.4.15",
+  "trafilatura==2.2.0",
+  "pymupdf==1.28.2",
+]
 daytona = ["daytona==0.155.0"]
 vercel = ["vercel==0.7.2"]
 google-meet = ["playwright==1.62.0", "websockets==15.0.1"]

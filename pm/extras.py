@@ -23,6 +23,8 @@ ANCHORS: dict[str, str | tuple[str, ...]] = {
     "firecrawl": "firecrawl",
     "parallel-web": "parallel",
     "ddgs": "ddgs",
+    # Fork (medical-research): local tiered fetcher for web_extract (tools/web_tools_local_deps.py).
+    "web-local": ("curl_cffi", "scrapling", "trafilatura", "pymupdf"),
     "otlp": "opentelemetry.sdk",
     "langfuse": "langfuse",
     "mistral": "mistralai",

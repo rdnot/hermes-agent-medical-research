@@ -28,10 +28,11 @@
 | **ReadFileTool limits** | ✅ | ❌ Config | `file_read_max_chars` |
 | **_CHAT_RETRY_DELAYS** | ✅ 5 attempts | ❌ SKIP | Hermes: 3 retries, jittered |
 
-## Fork Changes (18 customizations)
+## Fork Changes (19 customizations)
 
 ### Web Tools (`tools/web_tools.py`)
 - **Tiered Local Fetcher**: curl_cffi (Chrome TLS) → Scrapling (JS/Cloudflare) → httpx fallback
+- **`web-local` extra, installed on first use**: the fetcher stack (curl_cffi, scrapling[fetchers], trafilatura, PyMuPDF) is a pinned extra in `pyproject.toml` / `uv.lock`. The first `web_extract` with `extract_backend: local` installs it through PM (`tools/web_tools_local_deps.py`), which records it in PM's ledger so every later `hermes update` rebuild keeps it, then downloads the Chromium build patchright pins. No manual `pip install` and nothing to redo after updates
 - **Same gates as the cloud providers**: the website blocklist (`website_policy`) runs before any local fetch, and every redirect hop is re-checked against the SSRF filter and the blocklist (curl_cffi follows redirects one guarded hop at a time, httpx uses upstream's SSRF-safe client, Scrapling's landing URL is re-checked). A blocked hop is a per-URL error, never a cloud-fallback candidate
 - **`web.extract_backend: local`**: Bypass cloud APIs entirely for extraction
 - **Per-capability backend split**: Fork adds `local` as extract backend with smart fallback
@@ -132,11 +133,68 @@ web:
 
 > **Content handling (all backends):** No LLM summarization — content is returned as clean text (trafilatura for local, backend-native extraction for cloud). Pages ≤ `extract_char_limit` (default 400,000) are returned whole. Pages exceeding the limit get a deterministic head+tail truncation with the full text stored to `cache/web/` and a footer telling the model the `read_file` offset for the omitted middle.
 
-- **Tell Hermes to** : install required dependencies (curl_cffi, scrapling, scrapling[fetchers], trafilatura, PyMuPDF (PyMuPDF is optional)) then install the browser dependencies with `scrapling install`)
+- **Nothing to install by hand.** The first `web_extract` with `extract_backend: local` installs the `web-local` extra through PM (the CLI asks `Install it now? [Y/n]`; the gateway installs silently) and then downloads Chromium for Scrapling (a few minutes, once per machine). See *Dependencies: how the fork stack is installed and updated* below.
 
 - **Restart Hermes agent** : `/exit` then `hermes --tui` (in CLI), `/restart` (in messaging app)
 
 - **Tell Hermes to** : do 1 web search then 1 local web extraction about pubmed article : Pneumonia—Overview from Encyclopedia of Respiratory Medicine then summarize and report completeness / word count (should has ~7,800 words)
+
+## Switching an existing Hermes install to this fork
+
+`hermes update` pulls `origin/<current branch>` of the checkout it manages, so pointing that checkout's
+`origin` at the fork is all it takes. Linux/macOS checkout: `~/.hermes/hermes-agent`; Windows:
+`%LOCALAPPDATA%\hermes\hermes-agent`.
+
+```bash
+cd ~/.hermes/hermes-agent                      # Windows: cd %LOCALAPPDATA%\hermes\hermes-agent
+git remote set-url origin https://github.com/rdnot/hermes-agent-medical-research.git
+git fetch origin
+git reset --hard origin/main                   # the fork's main is upstream main + the fork commits
+hermes update                                  # rebuilds the PM venv from the fork's uv.lock
+```
+
+Then set `web.extract_backend: local` in `config.yaml` (see the config block above) and run one
+`web_extract`. That first call installs the fetcher stack and Chromium; every call after that is
+instant. To do the install ahead of time instead (for example on a server before a shift):
+
+```bash
+hermes pm install venv --extra web-local       # the extra, recorded in PM's ledger
+python -m patchright install chromium          # from the Hermes venv; ~150 MB, once per machine
+```
+
+### Already on the fork with the old manual `pip install` workaround
+
+Nothing to undo. Your next `hermes update` rebuilds the venv from the new `uv.lock`, which drops the
+hand-installed copies; the first local `web_extract` after that installs the pinned `web-local` extra
+through PM (one `[Y/n]` in the CLI, silent in the gateway) and records it, so the workaround is never
+needed again. Chromium already in `~/.cache/ms-playwright` (Windows: `%LOCALAPPDATA%\ms-playwright`)
+is reused as long as it is the revision patchright pins (1234 for patchright 1.62.x); otherwise the
+first call downloads the right one.
+
+## Dependencies: how the fork stack is installed and updated
+
+| | |
+|---|---|
+| Declared in | `pyproject.toml` → `[project.optional-dependencies] web-local`, exact pins (`==`), like every upstream dependency |
+| Locked in | `uv.lock` (regenerated with `hermes pm lock`; never hand-edited) |
+| Installed by | PM, on first use of `extract_backend: local` (`tools/web_tools_local_deps.py`), or `hermes pm install venv --extra web-local` |
+| Survives `hermes update` | Yes: PM records the extra in its ledger and includes it in every venv rebuild |
+| Chromium | patchright's pinned revision, downloaded on first use into playwright's cache (outside the venv and PM's store, so it survives rebuilds and `pm gc`) |
+| Auto-upgrades from PyPI | **No.** Versions move only when the fork bumps them (below). `hermes update` installs exactly what the fork's lock says |
+
+**Bumping the fork pins** (do it in a clone, never the live checkout):
+
+1. Edit the four lines in the `web-local` block of `pyproject.toml`. patchright is transitive via
+   `scrapling[fetchers]` and follows it.
+2. `hermes pm lock`. It enforces upstream's 14-day quarantine (`[tool.uv] exclude-newer`), so a
+   release younger than 14 days is refused: pick the newest version that locks.
+3. Commit `pyproject.toml` and `uv.lock` together and push `main`. Every machine's next
+   `hermes update` installs the new versions; if the patchright revision changed, the first local
+   `web_extract` downloads the matching Chromium by itself.
+
+**Upstream merges will conflict on `uv.lock`.** Resolve mechanically: take upstream's `uv.lock`,
+keep the fork's `pyproject.toml` (it carries the extra), run `hermes pm lock`, verify the four
+packages are back in the lock (`grep -c 'name = "scrapling"' uv.lock`), commit.
 
 ### ✅ Ready for Testing
 

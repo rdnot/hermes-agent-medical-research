@@ -19,8 +19,9 @@ from typing import Dict, List, Any, Optional
 _firecrawl_client = _firecrawl_client_config = _parallel_client = _async_parallel_client = _exa_client = None
 
 # ─── Optional Local Fetcher Dependencies (fork) ───────────────────────────────
-# These provide free local fallback when cloud APIs are unavailable or fail.
-# Install with: pip install curl_cffi scrapling PyMuPDF trafilatura
+# The ``web-local`` extra (pyproject.toml). Absent on a fresh checkout: web_extract's local
+# branch installs it through PM on first use (tools/web_tools_local_deps.py) and rebinds
+# these names, so the flags below are the import-time state only.
 
 try:
     from curl_cffi import requests as curl_requests
@@ -41,7 +42,7 @@ except ImportError:
     HAS_SCRAPLING = False
 
 try:
-    import fitz  # PyMuPDF
+    import pymupdf as fitz  # PyMuPDF (the `fitz` alias import is deprecated upstream)
     HAS_PYMUPDF = True
 except ImportError:
     HAS_PYMUPDF = False
@@ -1049,6 +1050,15 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
                     get_provider as _wsp_get_provider,
                 )
                 from tools.interrupt import is_interrupted as _is_interrupted
+                from tools.web_tools_local_deps import ensure_chromium, ensure_local_fetcher_stack
+
+                # First use on this machine: PM installs the web-local extra (recorded in its
+                # ledger, so every later venv rebuild keeps it), then patchright fetches the
+                # Chromium build the stealth tier needs. Both are no-ops once present. Off the
+                # event loop: a venv sync or a browser download takes minutes.
+                await asyncio.to_thread(ensure_local_fetcher_stack, globals())
+                if HAS_SCRAPLING:
+                    await asyncio.to_thread(ensure_chromium)
 
                 # Phase 1: local fetch — position-aligned so upstream's
                 # input-order reconstruction (by_index via safe_indices)
