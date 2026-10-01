@@ -182,6 +182,10 @@ first call downloads the right one.
 | Chromium | patchright's pinned revision, downloaded on first use into playwright's cache (outside the venv and PM's store, so it survives rebuilds and `pm gc`) |
 | Auto-upgrades from PyPI | **No.** Versions move only when the fork bumps them (below). `hermes update` installs exactly what the fork's lock says |
 
+### For the fork maintainer (not needed by users of the fork)
+
+Users only ever run `hermes update`. The two procedures below change the fork repository itself.
+
 **Bumping the fork pins** (do it in a clone, never the live checkout):
 
 1. Edit the four lines in the `web-local` block of `pyproject.toml`. patchright is transitive via
