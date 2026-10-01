@@ -5,6 +5,7 @@ import { useEffect, useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { getLatestSessionMessages, getSession } from '@/hermes'
+import { en } from '@/i18n/en'
 import { textPart, toChatMessages } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $compactingSessions, setSessionCompacting } from '@/store/compaction'
@@ -2735,6 +2736,51 @@ describe('usePromptActions submit / queue drain semantics', () => {
     expect(requestGateway).not.toHaveBeenCalledWith('prompt.submit', expect.anything())
     dropSessionState(RUNTIME_SESSION_ID)
   })
+
+  it('reports the exact accepted identity through onAccepted after a stale-runtime recovery', async () => {
+    const STORED_SESSION_ID = 'stored-db-xyz789'
+    const RECOVERED_SESSION_ID = 'rt-recovered-456'
+    let submitAttempts = 0
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'prompt.submit') {
+        submitAttempts += 1
+
+        if (submitAttempts === 1) {
+          throw new Error('session not found')
+        }
+
+        return {} as never
+      }
+
+      if (method === 'session.resume') {
+        return { session_id: RECOVERED_SESSION_ID } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+        storedSessionId={STORED_SESSION_ID}
+      />
+    )
+
+    const onAccepted = vi.fn()
+
+    const ok = await handle!.submitText('identity after wake', { onAccepted })
+
+    expect(ok).toBe(true)
+    expect(onAccepted).toHaveBeenCalledTimes(1)
+    expect(onAccepted).toHaveBeenCalledWith({
+      runtimeSessionId: RECOVERED_SESSION_ID,
+      storedSessionId: STORED_SESSION_ID
+    })
+  })
 })
 
 describe('usePromptActions redirectPrompt', () => {
@@ -2780,6 +2826,40 @@ describe('usePromptActions redirectPrompt', () => {
     )
 
     expect(await handle!.redirectPrompt('too late')).toBe(false)
+  })
+
+  it('refuses to steer a session with no live turn — no echo, no RPC (#105176)', async () => {
+    // The composer's busy belief lags the slice by an effect tick on the
+    // busy→false settle edge, so a steer can reach redirectPrompt for a session
+    // whose turn already settled: not busy, no stream, not awaiting a response.
+    // There is nothing to redirect, so it must NOT echo a bubble into this chat
+    // nor RPC an idle session — returning false lets the caller queue the text
+    // for the conversation whose run is actually live.
+    publishSessionState(RUNTIME_SESSION_ID, createClientSessionState(RUNTIME_SESSION_ID))
+
+    try {
+      const requestGateway = vi.fn(async () => ({ status: 'redirected' }) as never)
+      // The stale belief: busy was true when the steer was fired.
+      const staleBusyRef = { current: true }
+
+      let handle: HarnessHandle | null = null
+      const capturedStates: Record<string, unknown>[] = []
+      await actRender(
+        <Harness
+          busyRef={staleBusyRef}
+          onReady={h => (handle = h)}
+          onSeedState={state => capturedStates.push(state)}
+          refreshSessions={async () => undefined}
+          requestGateway={requestGateway}
+        />
+      )
+
+      expect(await handle!.redirectPrompt('stale steer')).toBe(false)
+      expect(requestGateway).not.toHaveBeenCalled()
+      expect(capturedStates).toEqual([])
+    } finally {
+      dropSessionState(RUNTIME_SESSION_ID)
+    }
   })
 
   it('reports rejection without throwing when the redirect RPC errors', async () => {
@@ -3104,6 +3184,7 @@ describe('usePromptActions restoreToMessage', () => {
     $messages.set(initialMessages as never)
 
     let submitAttempts = 0
+
     const requestGateway = vi.fn(async (method: string, _params?: Record<string, unknown>) => {
       if (method === 'prompt.submit') {
         submitAttempts += 1
@@ -6286,6 +6367,48 @@ describe('usePromptActions stale multi-window guard (#65047)', () => {
       'prompt.submit',
       { session_id: RUNTIME_SESSION_ID, text: 'send anyway' },
       1_800_000
+    )
+  })
+
+  it('refuses a slash command sent alongside an attachment instead of silently degrading to a chat message (#81798)', async () => {
+    // The attachment's refText gets prepended ahead of the typed text by
+    // buildContextText, so the merged wire text no longer starts with "/".
+    // Before the fix, submitText's attachment-count gate silently fell through
+    // to a normal prompt.submit — /goal (and every other slash command) with an
+    // attachment vanished into a regular chat message with no feedback.
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'slash.exec') {
+        throw new Error('slash.exec must never be called when an attachment is present')
+      }
+
+      if (method === 'prompt.submit') {
+        throw new Error('prompt.submit must never be called for a slash command')
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
+
+    const ok = await handle!.submitText('/goal align with the handoff doc', {
+      attachments: [
+        {
+          id: 'file:handoff.md',
+          kind: 'file',
+          label: 'handoff.md',
+          path: '/Users/alice/handoff.md',
+          refText: '@file:`/Users/alice/handoff.md`'
+        }
+      ]
+    })
+
+    expect(ok).toBe(false)
+    expect(requestGateway).not.toHaveBeenCalled()
+    expect($notifications.get()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ message: en.desktop.slashCommandIgnoredBody })])
     )
   })
 })
