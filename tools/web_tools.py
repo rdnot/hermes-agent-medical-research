@@ -59,15 +59,10 @@ from plugins.web.firecrawl.provider import _is_tool_gateway_ready, check_firecra
 from tools.debug_helpers import DebugSession
 from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, read_selection, selection_exists
 from tools.url_safety import async_is_safe_url
-from tools.web_tools_rescue import (
-    _managed_search_fallback,
-    _rescue_eligible,
-    _rescue_extract,
-    _rescue_search,
-)
+from tools.web_tools_rescue import _managed_search_fallback, _rescue_eligible, _rescue_search
 from tools.web_tools_truncate import _effective_char_limit, _trim_results, _truncate_results, convert_base64_images_to_links
 from tools.web_tools_extract import (
-    _extract_safe_urls, _merge_in_order, _no_provider_error, _resolve_extract_provider, _result_entry,
+    _dispatch_extract, _extract_safe_urls, _merge_in_order, _no_provider_error, _resolve_extract_provider, _result_entry,
     _strict_selection_error, _validate_extract_urls,
 )
 
@@ -1017,13 +1012,9 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
                             "Local extract failed for %d URL(s), falling back to %s",
                             len(failed_urls), fb_provider.name,
                         )
-                        import inspect
-                        if inspect.iscoroutinefunction(fb_provider.extract):
-                            fallback_results = await fb_provider.extract(failed_urls, format=format)
-                        else:
-                            fallback_results = await asyncio.to_thread(
-                                fb_provider.extract, failed_urls, format=format
-                            )
+                        # Same capped dispatch as the cloud path: web.extract_timeout bounds the
+                        # vendor call and a timed-out batch gets the one-shot keyless rescue.
+                        fallback_results = await _dispatch_extract(fb_provider, failed_urls, format)
                         # Place fallback results back into their original positions
                         for (pos, _u), fb_res in zip(failed_positions, fallback_results):
                             results[pos] = fb_res
@@ -1034,229 +1025,12 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
                                 "url": u, "title": "", "content": "",
                                 "error": "Local fetch failed — all local fetchers exhausted and no extract-capable cloud backend available. Set web.backend or web.extract_backend to firecrawl, keenable, exa, or parallel.",
                             }
-            # All bundled providers (brave-free, ddgs, searxng, exa, parallel,
-            # tavily, firecrawl, keenable) now live as plugins. The dispatcher is a
-            # registry lookup + delegation. Some providers' extract() is
-            # async (parallel, firecrawl), others sync (exa, tavily, keenable) — we
-            # detect coroutine functions and await; sync functions run
-            # inline (the policy gate, SSRF re-check, etc. live inside the
-            # provider itself for the firecrawl per-URL loop).
-            elif backend != "local":
+            else:
                 _ensure_web_plugins_loaded()
-                from agent.web_search_registry import (
-                    get_active_extract_provider,
-                    get_provider as _wsp_get_provider,
-                    _disabled_web_plugin_for,
-                )
-
-                provider = _wsp_get_provider(backend) if backend else None
-                if provider is None or not provider.supports_extract():
-                    # When the configured name IS registered but doesn't support
-                    # extract (search-only providers like brave-free / ddgs /
-                    # searxng), surface that as a typed "search-only" error
-                    # rather than silently switching backends. When the name
-                    # isn't registered at all (typo / uninstalled plugin), fall
-                    # through to the active-provider walk.
-                    if provider is not None and not provider.supports_extract():
-                        return json.dumps(
-                            {
-                                "success": False,
-                                "error": (
-                                    f"{provider.display_name} is a search-only "
-                                    "backend and cannot extract URL content. "
-                                    "Set web.extract_backend to firecrawl, "
-                                    "tavily, keenable, exa, or parallel."
-                                ),
-                            },
-                            ensure_ascii=False,
-                        )
-                    from tools.tool_backend_helpers import (
-                        selection_error,
-                        selection_exists,
-                    )
-
-                    if backend and selection_exists("web"):
-                        # Strict selection: a stored-but-unregistered backend
-                        # errors by name instead of silently switching to
-                        # whatever the availability walk finds.
-                        disabled_key = _disabled_web_plugin_for(capability="extract")
-                        if disabled_key:
-                            _vendor = disabled_key.split("/", 1)[-1]
-                            error_text = (
-                                f"web.extract_backend is set to '{_vendor}', but "
-                                f"its plugin ('{disabled_key}') is disabled in "
-                                f"config. Re-enable it with `hermes plugins "
-                                f"enable {disabled_key}` (or remove it from "
-                                "plugins.disabled)."
-                            )
-                        else:
-                            error_text = selection_error(
-                                "web",
-                                f"'{backend}'",
-                                "no registered web extract provider has that name",
-                            )
-                        return json.dumps(
-                            {"success": False, "error": error_text},
-                            ensure_ascii=False,
-                        )
-                    provider = get_active_extract_provider()
-                    if provider is None:
-                        # If the configured backend is a bundled web plugin the
-                        # user explicitly disabled, the backend is set correctly
-                        # and the real fix is to re-enable the plugin — say so
-                        # instead of telling them to set web.extract_backend
-                        # (which they already did). #40190 follow-up.
-                        disabled_key = _disabled_web_plugin_for(capability="extract")
-                        if disabled_key:
-                            _vendor = disabled_key.split("/", 1)[-1]
-                            return json.dumps(
-                                {
-                                    "success": False,
-                                    "error": (
-                                        f"web.extract_backend is set to '{_vendor}', "
-                                        f"but its plugin ('{disabled_key}') is disabled "
-                                        "in config. Re-enable it with "
-                                        f"`hermes plugins enable {disabled_key}` "
-                                        "(or remove it from plugins.disabled)."
-                                    ),
-                                },
-                                ensure_ascii=False,
-                            )
-                        return json.dumps(
-                            {
-                                "success": False,
-                                "error": (
-                                    "No web extract provider configured. "
-                                    "Set web.extract_backend to firecrawl, "
-                                    "tavily, keenable, exa, or parallel."
-                                ),
-                            },
-                            ensure_ascii=False,
-                        )
-
-
-                # ── Extract cache (tools/web_result_cache.py) ─────────────────
-                # Disk-backed via cache/web: a URL extracted within the TTL is
-                # served from disk instead of re-scraped. Deliberately placed
-                # AFTER the secret-URL gate, SSRF gate, provider resolution, and
-                # strict-selection validation, and gated per-URL on the website
-                # blocklist policy — a hit skips only the vendor call, never a
-                # control. Policy-blocked URLs are treated as cache misses so
-                # dispatch handles them exactly as it would without a cache.
-                # Keys include the provider and format, so switching backends or
-                # formats within the TTL never serves the other's content.
-                from tools.web_result_cache import (
-                    extract_cache_get as _extract_cache_get,
-                    extract_cache_put as _extract_cache_put,
-                )
-                from tools.website_policy import check_website_access as _check_site
-                cached_results: Dict[int, Dict[str, Any]] = {}
-                fetch_urls: List[str] = []
-                fetch_positions: List[int] = []
-                for position, url in enumerate(safe_urls):
-                    hit = None
-                    try:
-                        _policy_block = _check_site(url)
-                    except Exception:  # noqa: BLE001 — policy errors fail open like dispatch
-                        _policy_block = None
-                    if _policy_block is None:
-                        hit = _extract_cache_get(
-                            url, format=format, provider=provider.name
-                        )
-                    if hit is not None:
-                        cached_results[position] = hit
-                    else:
-                        fetch_urls.append(url)
-                        fetch_positions.append(position)
-
-                if not fetch_urls:
-                    results = [cached_results[i] for i in range(len(safe_urls))]
-                else:
-                    logger.info(
-                        "Web extract via %s: %d URL(s)", provider.name, len(fetch_urls)
-                    )
-
-                    # Async-or-sync dispatch: parallel + firecrawl have async
-                    # extract(); exa + tavily + keenable are sync.
-                    import inspect
-                    _extract_rescued = False
-                    try:
-                        if inspect.iscoroutinefunction(provider.extract):
-                            results = await provider.extract(fetch_urls, format=format)
-                        else:
-                            # Run sync extract() in a thread so we don't block the
-                            # event loop on network I/O.
-                            results = await asyncio.to_thread(
-                                provider.extract, fetch_urls, format=format
-                            )
-                    except Exception as exc:  # noqa: BLE001 — candidate for rescue
-                        if _rescue_eligible(provider):
-                            _extract_rescued = True
-                            failed = [
-                                {"url": u, "title": "", "content": "", "error": str(exc)}
-                                for u in fetch_urls
-                            ]
-                            results = await asyncio.to_thread(
-                                _rescue_extract, provider.name, fetch_urls, failed
-                            )
-                        else:
-                            raise
-                    else:
-                        # One-shot keyless rescue when the WHOLE batch failed
-                        # (backend-level outage, not per-page problems). Stateless:
-                        # the next web_extract call uses the chosen backend again.
-                        if (
-                            results
-                            and all(r.get("error") for r in results)
-                            and _rescue_eligible(provider)
-                        ):
-                            _extract_rescued = True
-                            results = await asyncio.to_thread(
-                                _rescue_extract, provider.name, fetch_urls, results
-                            )
-
-                    # Cache each successful fetch's full clean text for TTL reuse
-                    # (best-effort; oversized pages are skipped by the cache).
-                    # NEVER cache a rescue-served batch: it came from a ring
-                    # vendor, not the chosen backend, and caching it would make
-                    # the one-shot rescue sticky for a whole TTL — the next call
-                    # must attempt the chosen backend again.
-                    if not _extract_rescued:
-                        for fetched_pos, fetched in enumerate(results):
-                            if fetched_pos >= len(fetch_urls):
-                                break
-                            if fetched.get("error"):
-                                continue
-                            _content = (
-                                fetched.get("raw_content", "") or fetched.get("content", "")
-                            )
-                            if _content:
-                                _extract_cache_put(
-                                    fetch_urls[fetched_pos],
-                                    _content,
-                                    title=fetched.get("title", ""),
-                                    format=format,
-                                    provider=provider.name,
-                                )
-
-                    # Merge fetched results back with cache hits, restoring the
-                    # safe_urls order the downstream reconstruction expects.
-                    if cached_results:
-                        merged: List[Dict[str, Any]] = [None] * len(safe_urls)  # type: ignore[list-item]
-                        for position, hit in cached_results.items():
-                            merged[position] = hit
-                        for fetched_pos, position in enumerate(fetch_positions):
-                            merged[position] = (
-                                results[fetched_pos]
-                                if fetched_pos < len(results)
-                                else {
-                                    "url": safe_urls[position],
-                                    "title": "",
-                                    "content": "",
-                                    "error": "Extract backend returned no result for this URL",
-                                }
-                            )
-                        results = merged
+                provider, error_json = _resolve_extract_provider(backend)
+                if error_json is not None:
+                    return error_json
+                results = await _extract_safe_urls(provider, safe_urls, format)
 
         # Reconstruct the original input order across invalid, blocked, and
         # provider-processed entries. Providers are expected to preserve the
