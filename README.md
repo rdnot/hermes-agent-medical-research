@@ -139,6 +139,20 @@ web:
 
 - **Tell Hermes to** : do 1 web search then 1 local web extraction about pubmed article : Pneumonia—Overview from Encyclopedia of Respiratory Medicine then summarize and report completeness / word count (should has ~7,800 words)
 
+### ✅ Ready for Testing
+
+Your comprehensive research use case should work:
+
+"Comprehensive research about pneumonia in ER , fetch at least 10 up-to-date, evidence-based and reliable sources or guidelines, make it into .md file in your workspace folder."
+
+**Expected Output:**
+- ✅ ~7000 words
+- ✅ ~50KB size
+- ✅ ~28 tool calls
+- ✅ Structured markdown
+- ✅ Tool summary displayed (in CLI)
+
+
 ## Switching an existing Hermes install to this fork
 
 `hermes update` pulls `origin/<current branch>` of the checkout it manages, so pointing that checkout's
@@ -199,19 +213,6 @@ Users only ever run `hermes update`. The two procedures below change the fork re
 **Upstream merges will conflict on `uv.lock`.** Resolve mechanically: take upstream's `uv.lock`,
 keep the fork's `pyproject.toml` (it carries the extra), run `hermes pm lock`, verify the four
 packages are back in the lock (`grep -c 'name = "scrapling"' uv.lock`), commit.
-
-### ✅ Ready for Testing
-
-Your comprehensive research use case should work:
-
-"Comprehensive research about pneumonia in ER , fetch at least 10 up-to-date, evidence-based and reliable sources or guidelines, make it into .md file in your workspace folder."
-
-**Expected Output:**
-- ✅ ~7000 words
-- ✅ ~50KB size
-- ✅ ~28 tool calls
-- ✅ Structured markdown
-- ✅ Tool summary displayed (in CLI)
 
 ---
 
