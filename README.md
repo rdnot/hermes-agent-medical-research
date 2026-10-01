@@ -32,6 +32,7 @@
 
 ### Web Tools (`tools/web_tools.py`)
 - **Tiered Local Fetcher**: curl_cffi (Chrome TLS) → Scrapling (JS/Cloudflare) → httpx fallback
+- **Same gates as the cloud providers**: the website blocklist (`website_policy`) runs before any local fetch, and every redirect hop is re-checked against the SSRF filter and the blocklist (curl_cffi follows redirects one guarded hop at a time, httpx uses upstream's SSRF-safe client, Scrapling's landing URL is re-checked). A blocked hop is a per-URL error, never a cloud-fallback candidate
 - **`web.extract_backend: local`**: Bypass cloud APIs entirely for extraction
 - **Per-capability backend split**: Fork adds `local` as extract backend with smart fallback
 - **SearXNG**: Upstream native support for `web.search_backend: searxng` (set `SEARXNG_URL` in env)

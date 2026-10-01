@@ -58,7 +58,8 @@ except ImportError:
 from plugins.web.firecrawl.provider import _is_tool_gateway_ready, check_firecrawl_api_key
 from tools.debug_helpers import DebugSession
 from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, read_selection, selection_exists
-from tools.url_safety import async_is_safe_url
+from tools.url_safety import SSRFConnectionBlocked, async_is_safe_url, create_ssrf_safe_async_client
+from tools.website_policy import check_website_access
 from tools.web_tools_rescue import _managed_search_fallback, _rescue_eligible, _rescue_search
 from tools.web_tools_truncate import _effective_char_limit, _trim_results, _truncate_results, convert_base64_images_to_links
 from tools.web_tools_extract import (
@@ -469,7 +470,30 @@ def _has_pubmed_article_content(content_bytes: bytes) -> bool:
     ])
 
 
-async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str]:
+class _LocalFetchBlocked(Exception):
+    """A hop of the local fetch targets a private address or a policy-blocked site. Carries the
+    offending URL and, for a policy block, the block metadata; never falls back to a cloud backend."""
+
+    def __init__(self, url: str, message: str, blocked: Optional[Dict[str, str]] = None):
+        super().__init__(message)
+        self.url, self.message, self.blocked = url, message, blocked
+
+
+_UNSAFE_HOP_MSG = "Blocked: URL targets a private or internal network address"
+_MAX_LOCAL_REDIRECTS = 10
+
+
+async def _guard_hop(url: str) -> None:
+    """Re-run the SSRF filter and the website blocklist on a URL the fetch is about to follow
+    (or landed on). The tool checked only the model-supplied URL; every redirect hop needs the same
+    two gates, the way the firecrawl provider re-checks its post-redirect URL."""
+    if not await async_is_safe_url(url):
+        raise _LocalFetchBlocked(url, _UNSAFE_HOP_MSG)
+    if blocked := check_website_access(url):
+        raise _LocalFetchBlocked(url, blocked["message"], blocked)
+
+
+async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str, str]:
     """
     Fetch URL bytes with tiered fallback strategy:
       1. curl_cffi           — Chrome TLS impersonation, fast, no browser
@@ -479,9 +503,13 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
                                 solve_cloudflare auto-enabled when CF detected.
       3. httpx               — last resort, no stealth
 
-    Returns (content_bytes, headers_dict, status_code, fetcher_name)
+    Redirects are followed one guarded hop at a time (curl_cffi), through the SSRF-safe transport
+    (httpx), or re-checked on the landing URL (Scrapling); a hop into a private address or a
+    policy-blocked site raises _LocalFetchBlocked, which no tier swallows.
+
+    Returns (content_bytes, headers_dict, status_code, fetcher_name, final_url)
     """
-    import httpx
+    from urllib.parse import urljoin
 
     is_reddit = "reddit.com" in url.lower()
 
@@ -498,14 +526,28 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
     if HAS_CURL_CPERF and not is_reddit and not is_pubmed:
         try:
             logger.debug("Fetching with curl_cffi: %s", url)
-            resp = curl_requests.get(url, timeout=timeout, impersonate="chrome")
+            current = url
+            for _hop in range(_MAX_LOCAL_REDIRECTS + 1):
+                # Sync client in a thread so a slow origin never blocks the event loop; redirects are
+                # followed here, not by curl, so each hop passes the SSRF + policy gates first.
+                resp = await asyncio.to_thread(
+                    curl_requests.get, current, timeout=timeout, impersonate="chrome", allow_redirects=False,
+                )
+                location = resp.headers.get("location") if 300 <= resp.status_code < 400 else None
+                if not location:
+                    break
+                current = urljoin(current, location)
+                await _guard_hop(current)
+            else:
+                raise _LocalFetchBlocked(current, f"Too many redirects (>{_MAX_LOCAL_REDIRECTS})")
             curl_cffi_status = resp.status_code
             curl_cffi_content = resp.content
-            if resp.status_code < 400 and _is_content_sufficient(resp.content, url):
-                content_type = resp.headers.get("content-type", "text/html")
-                return resp.content, dict(resp.headers), resp.status_code, "curl_cffi"
+            if resp.status_code < 400 and _is_content_sufficient(resp.content, current):
+                return resp.content, dict(resp.headers), resp.status_code, "curl_cffi", current
             # status >= 400 or JS shell → fall through to browser tier
             logger.debug("curl_cffi: status=%d, content insufficient → escalating", resp.status_code)
+        except _LocalFetchBlocked:
+            raise
         except Exception as e:
             logger.debug("curl_cffi failed: %s", e)
 
@@ -663,23 +705,36 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
                                 reason, _pubmed_max_attempts,
                             )
                             break
-                        content_type = resp.headers.get("content-type", "text/html") if resp.headers else "text/html"
+                        # The browser followed any redirects itself: re-gate the landing URL.
+                        final_url = str(getattr(resp, "url", "") or url)
+                        if final_url != url:
+                            await _guard_hop(final_url)
                         headers = dict(resp.headers or {})
                         logger.debug("Scrapling fetch succeeded (status=%d)", resp.status)
-                        return content, headers, resp.status, "scrapling"
+                        return content, headers, resp.status, "scrapling", final_url
                     logger.debug("Scrapling returned status %d", resp.status if resp else -1)
                 finally:
                     await session.close()
+        except _LocalFetchBlocked:
+            raise
         except Exception as e:
             logger.debug("Scrapling failed: %s", e)
 
     # ── Tier 3: httpx (last resort, no stealth) ───────────────────────────
     try:
         logger.debug("Fetching with httpx (fallback): %s", url)
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        # Connect-time SSRF validation covers every redirect hop; the blocklist is re-checked on
+        # the landing URL.
+        async with create_ssrf_safe_async_client(follow_redirects=True) as client:
             resp = await client.get(url, timeout=timeout)
-            content_type = resp.headers.get("content-type", "text/html")
-            return resp.content, dict(resp.headers), resp.status_code, "httpx"
+        final_url = str(resp.url)
+        if final_url != url:
+            await _guard_hop(final_url)
+        return resp.content, dict(resp.headers), resp.status_code, "httpx", final_url
+    except SSRFConnectionBlocked as e:
+        raise _LocalFetchBlocked(url, _UNSAFE_HOP_MSG) from e
+    except _LocalFetchBlocked:
+        raise
     except Exception as e:
         logger.debug("httpx failed: %s", e)
 
@@ -729,7 +784,10 @@ async def _fetch_and_process_locally(url: str, timeout: int = 60) -> Optional[Di
         Exception if fetch succeeds but processing fails.
     """
     try:
-        content_bytes, headers, status_code, fetcher = await _fetch_raw(url, timeout)
+        content_bytes, headers, status_code, fetcher, final_url = await _fetch_raw(url, timeout)
+    except _LocalFetchBlocked as blocked:
+        logger.info("Blocked local web_extract for %s: %s", blocked.url, blocked.message)
+        return _blocked_entry(url, blocked.message, blocked.blocked)
     except Exception as e:
         logger.debug("Local fetch failed for %s: %s", url, e)
         return None  # Signal to fall back to cloud API
@@ -758,7 +816,7 @@ async def _fetch_and_process_locally(url: str, timeout: int = 60) -> Optional[Di
                 "title": f"PDF: {url.split('/')[-1]}",
                 "content": text,
                 "raw_content": text,
-                "metadata": {"sourceURL": url, "content_type": "application/pdf"},
+                "metadata": {"sourceURL": final_url, "content_type": "application/pdf"},
             }
         except Exception as e:
             logger.warning("PDF extraction failed for %s: %s", url, e)
@@ -779,7 +837,7 @@ async def _fetch_and_process_locally(url: str, timeout: int = 60) -> Optional[Di
             "title": f"Image: {url.split('/')[-1]}",
             "content": f"![Image]({url})",
             "raw_content": f"data:{content_type};base64,{base64_img}",
-            "metadata": {"sourceURL": url, "content_type": content_type, "is_image": True},
+            "metadata": {"sourceURL": final_url, "content_type": content_type, "is_image": True},
         }
     
     # Handle HTML/text
@@ -809,8 +867,15 @@ async def _fetch_and_process_locally(url: str, timeout: int = 60) -> Optional[Di
         "title": title,
         "content": text,
         "raw_content": text,
-        "metadata": {"sourceURL": url, "content_type": content_type},
+        "metadata": {"sourceURL": final_url, "content_type": content_type},
     }
+
+
+def _blocked_entry(url: str, message: str, blocked: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Per-URL entry for a fetch refused by the SSRF filter or the website blocklist. Same shape the
+    firecrawl provider returns (``blocked_by_policy`` carries host/rule/source for a policy block)."""
+    policy = {"blocked_by_policy": {k: blocked[k] for k in ("host", "rule", "source")}} if blocked else {}
+    return {"url": url, "title": "", "content": "", "error": message, **policy}
 
 
 def _ensure_web_plugins_loaded() -> None:
@@ -983,6 +1048,12 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
                 for pos, u in enumerate(safe_urls):
                     if _is_interrupted():
                         results[pos] = {"url": u, "error": "Interrupted", "title": ""}
+                        continue
+                    # Website blocklist runs before any fetch, as it does inside the cloud providers;
+                    # a blocked URL is a final per-URL error, never a cloud-fallback candidate.
+                    if blocked := check_website_access(u):
+                        logger.info("Blocked web_extract for %s by rule %s", blocked["host"], blocked["rule"])
+                        results[pos] = _blocked_entry(u, blocked["message"], blocked)
                         continue
                     local_result = await _fetch_and_process_locally(u, timeout=60)
                     if local_result is not None:
