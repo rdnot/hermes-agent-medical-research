@@ -206,7 +206,7 @@ class CLIInitMixin:
         self.max_turns = _resolve_turn_limit(next(
             (v for v in (max_turns, CLI_CONFIG["agent"].get("max_turns"), CLI_CONFIG.get("max_turns")) if v is not None),
             os.getenv("HERMES_MAX_ITERATIONS"),
-        ), default=200)  # Fork default: 200 (upstream: unlimited)
+        ))
         self.run_budget_seconds = run_budget if run_budget is not None else CLI_CONFIG["agent"].get("run_budget_seconds")
 
     def _init_toolsets(self, toolsets):

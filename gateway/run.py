@@ -1613,9 +1613,6 @@ def _current_max_iterations() -> int:
     slot holding the launch profile's value, so every secondary would inherit the default's budget."""
     _reload_runtime_env_preserving_config_authority()
     from hermes_cli.config import resolve_turn_limit as _resolve_turn_limit
-    # Fork: default 200 for comprehensive research (upstream default: unlimited)
-    # — see SKILL.md fork customization #20. Applied to BOTH the routed-profile
-    # read and the env-bridge read so every gateway path defaults to 200.
     override = get_hermes_home_override()
     if override:
         config_path = Path(override) / 'config.yaml'
@@ -1624,8 +1621,8 @@ def _current_max_iterations() -> int:
         except Exception:
             cfg = {}
         agent_cfg = cfg.get("agent")
-        return _resolve_turn_limit(agent_cfg.get("max_turns") if isinstance(agent_cfg, dict) else None, default=200)
-    return _resolve_turn_limit(os.getenv("HERMES_MAX_ITERATIONS"), default=200)
+        return _resolve_turn_limit(agent_cfg.get("max_turns") if isinstance(agent_cfg, dict) else None)
+    return _resolve_turn_limit(os.getenv("HERMES_MAX_ITERATIONS"))
 
 
 from contextlib import asynccontextmanager as _asynccontextmanager, contextmanager as _contextmanager, suppress

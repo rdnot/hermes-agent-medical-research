@@ -1643,10 +1643,9 @@ def _run_conversation_turn(
     agent._last_persistence_error_cause = None
     agent._compression_adoption_failed = False
     agent._ephemeral_reasoning_off = False
-    # --- Fork customizations: tool-call tracking & force-final synthesis ---
+    # --- Fork customization: tool-call tracking for the CLI tool summary ---
     agent._current_turn_tool_calls = []
     agent._pending_tool_summary = ""
-    agent._force_final_threshold = max(1, agent.max_iterations - 2)
     # ----------------------------------------------------------------------
 
     agent._auth_pool_refresh_counts = {}

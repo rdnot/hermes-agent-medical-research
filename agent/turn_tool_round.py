@@ -87,20 +87,6 @@ def run_tool_round(
             "arguments": args,
         })
 
-    # ── Fork: Force-Final Threshold (prevent infinite loops) ──
-    # If we're near the iteration limit and still making tool calls,
-    # inject a user message forcing the model to synthesize findings.
-    if api_call_count >= getattr(agent, "_force_final_threshold", float("inf")):
-        agent._vprint(f"{agent.log_prefix}⚠️  Force-final threshold reached ({api_call_count}/{agent.max_iterations}) — requesting final answer...")
-        append_message(messages, {
-            "role": "user",
-            "content": (
-                "You have gathered sufficient information. For research query, don't use any more tools. "
-                "Provide your final comprehensive answer now based on all the information gathered. "
-                "Synthesize all findings into a well-structured response."
-            ),
-        })
-
     _tvv = validate_tool_calls(
         agent, assistant_message, finish_reason, messages=messages,
         conversation_history=conversation_history, api_call_count=api_call_count,

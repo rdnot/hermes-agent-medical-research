@@ -74,21 +74,11 @@ def _make_cli(env_overrides=None, config_overrides=None, **kwargs):
 class TestMaxTurnsResolution:
     """max_turns must always resolve to a positive integer, never None."""
 
-    def test_default_max_turns_is_200_fork(self):
-        # Fork divergence: default max_turns is 200 (upstream: unlimited/sys.maxsize).
-        # Still a positive int, so loop conditions like `count < max_iterations` keep working.
-        cli = _make_cli()
-        assert isinstance(cli.max_turns, int)
-        assert cli.max_turns == 200
 
     def test_explicit_max_turns_honored(self):
         cli = _make_cli(max_turns=25)
         assert cli.max_turns == 25
 
-    def test_none_max_turns_gets_default(self):
-        cli = _make_cli(max_turns=None)
-        assert isinstance(cli.max_turns, int)
-        assert cli.max_turns == 200
 
 
 
@@ -96,10 +86,6 @@ class TestMaxTurnsResolution:
         cli_obj = _make_cli(config_overrides={"agent": {}, "max_turns": 77})
         assert cli_obj.max_turns == 77
 
-    def test_max_turns_never_none_for_agent(self):
-        """The value passed to AIAgent must never be None (causes TypeError in run_conversation)."""
-        cli = _make_cli()
-        assert isinstance(cli.max_turns, int) and cli.max_turns == 200
 
 
 

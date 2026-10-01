@@ -47,8 +47,7 @@ class GatewayStartupMixin:
         resolve it the same way the turn loop does (``none``/``unlimited`` spellings included) instead of
         ``int()`` on the raw string with an invented ``500`` default (#116888)."""
         from hermes_cli.config import TURN_LIMIT_UNLIMITED, resolve_turn_limit
-        # Fork: default 200 (matches gateway/run.py _current_max_iterations default=200), not unlimited.
-        limit = resolve_turn_limit(os.getenv("HERMES_MAX_ITERATIONS"), default=200)
+        limit = resolve_turn_limit(os.getenv("HERMES_MAX_ITERATIONS"))
         logger.info("Agent budget: max_iterations=%s (agent.max_turns from config.yaml, else the HERMES_MAX_ITERATIONS bridge)",
                     "unlimited" if limit == TURN_LIMIT_UNLIMITED else limit)
 

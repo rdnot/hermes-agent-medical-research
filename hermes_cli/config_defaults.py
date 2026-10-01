@@ -73,10 +73,9 @@ DEFAULT_CONFIG = {
         "storage": "hermes-home",
     },
     "agent": {
-        # Fork default: 200 for comprehensive research (upstream: None = unlimited).
-        # The value is normalized by hermes_cli.config.resolve_turn_limit —
-        # "none"/"unlimited"/"inf"/0/-1 all resolve to the unlimited sentinel.
-        "max_turns": 200,
+        # Turn cap. null = unlimited (default; caps caused silent mid-task truncation). Positive int
+        # caps; "none"/"unlimited"/"inf"/0/-1 also mean unlimited (resolve_turn_limit).
+        "max_turns": None,
         # Optional one-time model-visible checkpoint warning before a finite turn cap is exhausted.
         # null = off; set a ratio strictly between 0 and 1 (for example, 0.75).
         "budget_warning_ratio": None,

@@ -4,7 +4,7 @@
 >
 > — **89/100** · *Claude (free tier), acting as a satisfied reviewer*
 
-**Last fork README.md update:** 2026-08-09
+**Last fork README.md update:** 2026-10-01
 
 ## Nanobot Medical Research Fork → Hermes Port Status
 
@@ -12,9 +12,9 @@
 |---------|---------|--------|------|
 | **Tiered Web Fetcher** | ✅ curl_cffi + Scrapling | ✅ Fork | P0 |
 | **PDF Extraction** | ✅ PyMuPDF | ✅ Fork | P0 |
-| **Force-Final Threshold** | ✅ max_iter - 2 | ✅ Fork | P0 |
+| **Force-Final Threshold** | ✅ max_iter - 2 | ❌ Removed | Injected a mid-loop user message (breaks role alternation); upstream's `agent.budget_warning_ratio` + max-iterations summary cover it |
 | **Tool Summary Display** | ✅ CLI only | ✅ Fork | P0 |
-| **Max Iterations (200)** | ✅ Default | ✅ Fork | P0 |
+| **Max Iterations (200)** | ✅ Default | ❌ Removed | Upstream default is unlimited (`agent.max_turns: null`); set `agent.max_turns` in config.yaml if you want a cap |
 | **max_tool_result_chars (400K)** | ✅ | ✅ Fork | P0 |
 | **SearXNG Search** | ✅ Hardcoded URL | ✅ Upstream | `web.search_backend: searxng` |
 | **LLM Summarization** | ✅ Disabled | ✅ Upstream removed | Deterministic truncation replaces it |
@@ -28,7 +28,7 @@
 | **ReadFileTool limits** | ✅ | ❌ Config | `file_read_max_chars` |
 | **_CHAT_RETRY_DELAYS** | ✅ 5 attempts | ❌ SKIP | Hermes: 3 retries, jittered |
 
-## Fork Changes (22 customizations)
+## Fork Changes (18 customizations)
 
 ### Web Tools (`tools/web_tools.py`)
 - **Tiered Local Fetcher**: curl_cffi (Chrome TLS) → Scrapling (JS/Cloudflare) → httpx fallback
@@ -43,17 +43,15 @@
 - **Auto-fallback**: Local extract fails → falls back to `web.backend`, skips search-only backends
 - **PubMed/PMC hardening**: reCAPTCHA retry + article-content validator (rejects HTTP-200 title-only shells); Jina Reader fallback for PMC URLs only when all raw fetchers return non-article HTML
 
-### Agent (`run_agent.py`)
-- **max_iterations = 200** (upstream: 90)
-- **Force-final threshold** at N-2 (prevents infinite tool loops)
+### Agent (`agent/`)
 - **Tool summary tracking** + `result['tool_summary']` key (CLI streaming display)
+- *(Removed Oct 2026)* `max_iterations = 200` default and the N-2 force-final user-message injection. Both reverted to upstream: the turn cap is unlimited by default (`agent.max_turns`), and the iteration budget is handled by upstream's cache-safe `agent.budget_warning_ratio` warning plus its toolless summary request at the cap.
 
 ### Budget (`tools/budget_config.py`)
 - **DEFAULT_RESULT_SIZE_CHARS = 400,000** (upstream: 100,000)
 - **DEFAULT_TURN_BUDGET_CHARS = 500,000** (upstream: 200,000)
 
 ### CLI & Gateway
-- **CLI/Gateway defaults** aligned to 200 iterations
 - **Tool summary in streaming mode** (printed after stream box closes)
 
 ### LINE Messenger (`gateway/config.py`, `plugins/platforms/line/adapter.py`)
