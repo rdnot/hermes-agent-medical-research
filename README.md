@@ -43,7 +43,7 @@
 - **Extract char_limit = 400,000** (fork raised from upstream's 15,000) — medical articles (20K–80K chars) are returned **whole**, not truncated to 15K. Only pages >400K get head+tail truncation.
 - **`web_extract` max_result_size_chars = 500,000** (upstream: 100,000)
 - **Auto-fallback**: Local extract fails → falls back to `web.backend`, skips search-only backends
-- **PubMed/PMC hardening**: reCAPTCHA retry + article-content validator (rejects HTTP-200 title-only shells); Jina Reader fallback for PMC URLs only when all raw fetchers return non-article HTML
+- **PubMed/PMC hardening** (ported from the nanobot fork, Oct 2026): recognizes both NCBI interstitials (reCAPTCHA Enterprise and the "Cookies must be enabled" proof-of-work shell, often HTTP 203); the Scrapling tier waits up to 25 s for the challenge to clear, survives its reload, and keeps the rendered DOM instead of the pre-challenge response body; article validator with current PMC markers plus a visible-text fallback. A shell or an HTTP error page from any tier is never returned as an article: PubMed/PMC tries Jina Reader, then falls back to `web.backend` like any other local failure (PDFs skip the HTML check)
 
 ### Agent (`agent/`)
 - **Tool summary tracking** + `result['tool_summary']` key (CLI streaming display)

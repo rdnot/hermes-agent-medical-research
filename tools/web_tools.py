@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import re
-from typing import Dict, List, Any, Optional
+from typing import Any, Callable, Dict, List, Optional
 # Per-vendor client cache slots; plugins read/write these via tools.web_tools (tests reset them to None).
 _firecrawl_client = _firecrawl_client_config = _parallel_client = _async_parallel_client = _exa_client = None
 
@@ -448,37 +448,99 @@ def _html_to_text(html: str, url: str = "") -> str:
     return text or html
 
 
+_NCBI_BROWSER_HOSTS = ("pubmed.ncbi.nlm.nih.gov", "pmc.ncbi.nlm.nih.gov")
+# Below this much visible text a page that matched no article marker is a title-only shell.
+_NCBI_ARTICLE_MIN_VISIBLE_CHARS = 2_500
+
+
+def _is_ncbi_article_url(url: str) -> bool:
+    lowered = url.lower()
+    return any(host in lowered for host in _NCBI_BROWSER_HOSTS)
+
+
+def _visible_text(raw_html: str) -> str:
+    text = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>|<[^>]+>", " ", raw_html, flags=re.I)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _is_recaptcha_challenge(content_bytes: bytes) -> bool:
-    """
-    Detect Google reCAPTCHA Enterprise challenge pages (HTTP 200).
-    PMC/PubMed serves these as an interstitial before the real article.
-    The page contains 'Checking your browser' and loads grecaptcha.enterprise.js.
-    """
-    try:
-        raw = content_bytes.decode("utf-8", errors="replace").lower()
-    except Exception:
-        return False
-    return "checking your browser" in raw and "recaptcha" in raw
+    """NCBI interstitials served with a 2xx status instead of the article: the reCAPTCHA Enterprise
+    page ("Checking your browser") and the newer proof-of-work shell ("Cookies must be enabled",
+    often HTTP 203). The cookie wording counts only on a shell-sized page, so an article that merely
+    mentions cookies passes."""
+    raw = content_bytes.decode("utf-8", errors="replace").lower()
+    if "checking your browser" in raw and "recaptcha" in raw:
+        return True
+    return "cookies must be enabled" in raw and len(raw) < 20_000
 
 
 def _has_pubmed_article_content(content_bytes: bytes) -> bool:
-    """Return True when PubMed/PMC HTML contains the real article body, not a shell/challenge."""
-    try:
-        raw = content_bytes.decode("utf-8", errors="replace").lower()
-    except Exception:
-        return False
+    """True when PubMed/PMC HTML carries the article rather than a shell/challenge. Known layout
+    markers are accepted directly; because NCBI changes its markup, a non-challenge page with
+    substantial visible text also counts (title-only shells have a few hundred characters)."""
     if _is_recaptcha_challenge(content_bytes):
         return False
-    # PMC full article pages consistently include these server-rendered article markers.
-    # Title-only/shell pages can still return HTTP 200, so status alone is not enough.
-    return any(marker in raw for marker in [
-        'id="main-content"',
-        'id="article-container"',
-        'pmc-article-section',
-        'article-body',
-        'class="abstract"',
-        'section class="abstract"',
-    ])
+    raw = content_bytes.decode("utf-8", errors="replace").lower()
+    if any(marker in raw for marker in (
+        'id="main-content"', 'id="article-container"', "pmc-article-section",
+        "article-body", 'class="abstract"', 'section class="abstract"',
+        'class="main-article-body"', "pmc-layout", 'aria-label="article content"',
+    )):
+        return True
+    return len(_visible_text(raw)) >= _NCBI_ARTICLE_MIN_VISIBLE_CHARS
+
+
+def _bookshelf_has_content(content_bytes: bytes) -> bool:
+    if _is_recaptcha_challenge(content_bytes):
+        return False
+    return len(_visible_text(content_bytes.decode("utf-8", errors="replace"))) >= _NCBI_ARTICLE_MIN_VISIBLE_CHARS
+
+
+async def _page_html_or_empty(page: Any) -> bytes:
+    """Rendered DOM, or b"" while the page is navigating (NCBI reloads after its challenge)."""
+    try:
+        return (await page.content()).encode("utf-8", errors="replace")
+    except Exception:
+        return b""
+
+
+async def _settle(page: Any, ms: int) -> None:
+    try:
+        await page.wait_for_timeout(ms)
+    except Exception:
+        await asyncio.sleep(ms / 1000)
+
+
+async def _wait_for_ncbi_content(
+    page: Any, has_content: Callable[[bytes], bool], *, label: str,
+    poll_ms: int = 100, max_wait_ms: int = 25_000, reload_after_ms: int = 12_000,
+) -> bool:
+    """Poll the live DOM until *has_content* accepts it. NCBI's interstitial (reCAPTCHA Enterprise or
+    the cookie proof-of-work page) solves itself and then calls ``location.reload()``; during that
+    navigation every call on the old document raises, so each probe tolerates errors and keeps
+    polling. One manual reload is attempted midway in case the interstitial's redirect never fires.
+    Returns whether content appeared."""
+    waited, reloaded, challenge_seen = 0, False, False
+    while waited <= max_wait_ms:
+        html = await _page_html_or_empty(page)
+        if html and has_content(html):
+            if challenge_seen:
+                logger.info("%s: challenge cleared, content loaded after %d ms", label, waited)
+            return True
+        if html and not challenge_seen and _is_recaptcha_challenge(html):
+            challenge_seen = True
+            logger.info("%s challenge detected — waiting for content", label)
+        if waited >= reload_after_ms and not reloaded:
+            reloaded = True
+            logger.debug("%s: interstitial persists, attempting page.reload()", label)
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=15_000)
+            except Exception:
+                pass
+        await _settle(page, poll_ms)
+        waited += poll_ms
+    logger.debug("%s: content still absent after %d ms", label, waited)
+    return False
 
 
 class _LocalFetchBlocked(Exception):
@@ -524,8 +586,11 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
 
     is_reddit = "reddit.com" in url.lower()
 
-    # PubMed/PMC blocks curl_cffi and httpx with Cloudflare — skip curl_cffi, go straight to Scrapling
-    is_pubmed = "pubmed.ncbi.nlm.nih.gov" in url.lower() or "pmc.ncbi.nlm.nih.gov" in url.lower()
+    # PubMed/PMC answer plain clients with a challenge shell — skip curl_cffi, go straight to Scrapling.
+    # NCBI Bookshelf keeps curl_cffi (its SSR pages pass _is_content_sufficient) and gets the same
+    # browser wait only if it falls through to Scrapling.
+    is_pubmed = _is_ncbi_article_url(url)
+    is_bookshelf = "ncbi.nlm.nih.gov/books/" in url.lower()
     if is_pubmed:
         logger.debug("PubMed detected — skipping curl_cffi, routing through Scrapling")
 
@@ -570,80 +635,27 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
                 logger.debug("Cloudflare detected → enabling solve_cloudflare")
             logger.debug("Fetching with Scrapling: %s (cf_solve=%s)", url, solve_cf)
 
-            # ── PubMed/PMC reCAPTCHA Enterprise page_action callback ──
-            # PMC serves a Google reCAPTCHA Enterprise challenge (HTTP 200) that
-            # sets a cookie (recaptcha-ca-e / recaptcha-fastly-e / recaptcha-cf-e)
-            # after invisible reCAPTCHA solves, then calls location.reload(true).
-            # Scrapling's fetch() would return the initial challenge HTML before the
-            # redirect fires. This page_action runs after navigation + CF solving,
-            # detects the reCAPTCHA challenge page, waits for the cookie, and lets
-            # the page reload before Scrapling captures the response.
-            _pubmed_recaptcha_action = None
-            if is_pubmed:
+            # NCBI interstitials (reCAPTCHA Enterprise / cookie proof-of-work) solve themselves and
+            # reload. Scrapling's response body is the document served BEFORE that, so for NCBI the
+            # page action waits for real content and captures the live DOM, which is what we keep.
+            _ncbi_has_content: Optional[Callable[[bytes], bool]] = (
+                _has_pubmed_article_content if is_pubmed else _bookshelf_has_content if is_bookshelf else None)
+            _ncbi_label = "PubMed" if is_pubmed else "Bookshelf"
+            _captured: Dict[str, Any] = {}
 
-                async def _pubmed_recaptcha_action(page):
-                    """Wait for PubMed/PMC reCAPTCHA to yield real article HTML inside Scrapling."""
-                    try:
-                        async def _page_has_article() -> bool:
-                            page_html = await page.content()
-                            return _has_pubmed_article_content(page_html.encode("utf-8", errors="replace"))
+            async def _ncbi_page_action(page):
+                _captured["ready"] = await _wait_for_ncbi_content(page, _ncbi_has_content, label=_ncbi_label)
+                for _ in range(10):  # the DOM may still be mid-navigation; retry briefly
+                    html = await _page_html_or_empty(page)
+                    if html:
+                        _captured["html"] = html
+                        return
+                    await _settle(page, 200)
 
-                        if await _page_has_article():
-                            logger.debug("PubMed: article content already present after navigation")
-                            return
-
-                        page_html = await page.content()
-                        if not _is_recaptcha_challenge(page_html.encode("utf-8", errors="replace")):
-                            # Not the known challenge, but also not article content. Give JS a short
-                            # chance to render before Scrapling captures a title-only shell.
-                            logger.debug("PubMed: no reCAPTCHA marker but article content absent; waiting for body markers")
-                            for _ in range(50):
-                                if await _page_has_article():
-                                    return
-                                await page.wait_for_timeout(100)
-                            return
-
-                        logger.info("PubMed reCAPTCHA challenge detected — waiting for article content")
-                        # Poll for the success cookie OR for real article markers. Some NCBI/PMC
-                        # variants do not expose the historical recaptcha-* cookie names to Playwright,
-                        # so DOM/article-content detection is the reliable success condition.
-                        _recaptcha_cookies = {
-                            "recaptcha-ca-e", "recaptcha-fastly-e",
-                            "recaptcha-cf-e", "recaptcha-akam-e",
-                        }
-                        for _ in range(200):
-                            if await _page_has_article():
-                                logger.info("PubMed: article content appeared after reCAPTCHA wait")
-                                return
-                            cookies = await page.context.cookies()
-                            cookie_names = {c["name"] for c in cookies}
-                            if cookie_names & _recaptcha_cookies:
-                                logger.debug("reCAPTCHA cookie detected, waiting for page reload/article markers")
-                                try:
-                                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
-                                except Exception:
-                                    pass
-                                for _ in range(30):
-                                    if await _page_has_article():
-                                        logger.info("PubMed: reCAPTCHA bypassed, article content loaded")
-                                        return
-                                    await page.wait_for_timeout(100)
-                            await page.wait_for_timeout(100)
-
-                        # Cookie/content not seen — try manual reload as last resort, then wait for
-                        # the article markers rather than returning immediately after a 200 shell.
-                        logger.debug("PubMed: reCAPTCHA cookie/content not detected, attempting page.reload()")
-                        await page.reload(wait_until="domcontentloaded", timeout=10000)
-                        for _ in range(50):
-                            if await _page_has_article():
-                                logger.info("PubMed: article content loaded after manual reload")
-                                return
-                            await page.wait_for_timeout(100)
-                    except Exception as rc_err:
-                        logger.debug("PubMed reCAPTCHA page_action failed: %s", rc_err)
-
-            # PubMed/PMC: retry up to 2 attempts if reCAPTCHA challenge persists
-            _pubmed_max_attempts = 2 if is_pubmed else 1
+            # NCBI: one retry, but only when the first attempt saw content and lost it in the final
+            # capture (a navigation race). A wait that ran out without the challenge clearing is not
+            # retried: a second 25 s wait rarely helps, and httpx is next.
+            _pubmed_max_attempts = 2 if _ncbi_has_content is not None else 1
 
             for _pubmed_attempt in range(_pubmed_max_attempts):
                 logger.debug(
@@ -665,9 +677,9 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
                         adaptive=True,
                         timeout_ms=fetch_timeout,
                     )
-                    # Attach the reCAPTCHA wait callback for PubMed/PMC URLs
-                    if _pubmed_recaptcha_action is not None:
-                        fetch_kwargs["page_action"] = _pubmed_recaptcha_action
+                    if _ncbi_has_content is not None:
+                        _captured.clear()
+                        fetch_kwargs["page_action"] = _ncbi_page_action
                     # Hard timeout for the entire scrapling fetch including CF solving.
                     # Scrapling's _cloudflare_solver has unbounded recursion — each attempt
                     # takes ~12s, so without a cap it loops forever on unsolvable challenges.
@@ -689,6 +701,11 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
                         # Scrapling may return bytes or str
                         if isinstance(content, str):
                             content = content.encode("utf-8", errors="replace")
+                        _rendered = _captured.get("html")
+                        if _rendered and len(_rendered) >= len(content) // 2:
+                            # Prefer the rendered DOM unless it is suspiciously small next to the
+                            # response body (captured mid-navigation).
+                            content = _rendered
                         # Reject results that are still a Cloudflare challenge page
                         # (scrapling solver may return without actually solving it)
                         if solve_cf and _is_cloudflare_protected(resp.status, content):
@@ -700,21 +717,19 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
                         # Reject PubMed/PMC title-only shells or unresolved challenge pages.
                         # Scrapling can return HTTP 200 before the real article body exists;
                         # accepting that poisons downstream processing with 40-word output.
-                        if is_pubmed and not _has_pubmed_article_content(content):
+                        if _ncbi_has_content is not None and not _ncbi_has_content(content):
                             if _is_recaptcha_challenge(content):
-                                reason = "reCAPTCHA still present"
+                                reason = "challenge still present"
                             else:
                                 reason = "article content markers absent"
-                            if _pubmed_attempt < _pubmed_max_attempts - 1:
+                            if _pubmed_attempt < _pubmed_max_attempts - 1 and _captured.get("ready"):
                                 logger.info(
-                                    "PubMed: Scrapling returned %s after attempt %d/%d, retrying…",
-                                    reason, _pubmed_attempt + 1, _pubmed_max_attempts,
+                                    "%s: Scrapling returned %s after attempt %d/%d, retrying…",
+                                    _ncbi_label, reason, _pubmed_attempt + 1, _pubmed_max_attempts,
                                 )
                                 continue
-                            logger.warning(
-                                "PubMed: Scrapling returned %s after %d attempts, skipping to next tier",
-                                reason, _pubmed_max_attempts,
-                            )
+                            logger.warning("%s: Scrapling returned %s after attempt %d, skipping to next tier",
+                                           _ncbi_label, reason, _pubmed_attempt + 1)
                             break
                         # The browser followed any redirects itself: re-gate the landing URL.
                         final_url = str(getattr(resp, "url", "") or url)
@@ -803,20 +818,28 @@ async def _fetch_and_process_locally(url: str, timeout: int = 60) -> Optional[Di
         logger.debug("Local fetch failed for %s: %s", url, e)
         return None  # Signal to fall back to cloud API
 
-    # PubMed/PMC sometimes returns HTTP 200 challenge/title-only shells from every raw
-    # fetcher. Never process/cache those as 40-word "success"; use Jina Reader as a
-    # last-resort article extractor if direct fetching did not obtain real article HTML.
+    # Tiers 1-2 only return < 400; the httpx last resort returns whatever came back. An error page
+    # is not an article: let the cloud fallback (or the per-URL error) handle it.
+    if status_code >= 400:
+        logger.info("Local fetch got HTTP %d for %s via %s; falling back", status_code, url, fetcher)
+        return None
+
+    content_type = headers.get("content-type", "text/html")
+
+    # PubMed/PMC answer every raw tier with a 2xx challenge or title-only shell when they are not
+    # satisfied. Never process/cache that as a 40-word "success": try Jina Reader, and if it cannot
+    # get the article either, fall back like any other local failure. PDFs carry no HTML markers.
     if (
-        "ncbi.nlm.nih.gov" in url.lower()
-        and "pmc" in url.lower()
+        _is_ncbi_article_url(url)
+        and "application/pdf" not in content_type.lower()
         and not _has_pubmed_article_content(content_bytes)
     ):
         logger.warning("PubMed/PMC raw fetch returned non-article HTML via %s; trying Jina fallback", fetcher)
         jina_result = await _fetch_jina(url, timeout=30)
         if jina_result is not None:
             return jina_result
-
-    content_type = headers.get("content-type", "text/html")
+        logger.warning("PubMed/PMC: no local fetcher or Jina returned the article for %s; falling back", url)
+        return None
 
     # Handle PDF
     if "application/pdf" in content_type or url.lower().endswith(".pdf"):
