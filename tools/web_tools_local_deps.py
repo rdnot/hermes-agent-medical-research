@@ -104,7 +104,7 @@ def required_chromium_revision() -> Optional[str]:
     try:
         import patchright
         manifest = Path(patchright.__file__).parent / "driver" / "package" / "browsers.json"
-        for browser in json.loads(manifest.read_text(encoding="utf-8")).get("browsers", []):
+        for browser in json.loads(manifest.read_text(encoding="utf-8-sig")).get("browsers", []):
             if browser.get("name") == "chromium":
                 return str(browser["revision"])
     except Exception as exc:  # noqa: BLE001 — no patchright, or an unexpected driver layout

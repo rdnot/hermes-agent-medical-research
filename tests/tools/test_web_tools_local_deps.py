@@ -68,7 +68,7 @@ def test_chromium_download_only_when_pinned_revision_is_missing(monkeypatch, tmp
     def _installer(timeout):
         runs.append(timeout)
         (tmp_path / "chromium-1234").mkdir()
-        (tmp_path / "chromium-1234" / "INSTALLATION_COMPLETE").write_text("")
+        (tmp_path / "chromium-1234" / "INSTALLATION_COMPLETE").write_text("", encoding="utf-8")
         return 0
 
     monkeypatch.setattr(deps, "_run_installer", _installer)
