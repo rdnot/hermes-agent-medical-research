@@ -1504,6 +1504,8 @@ export interface Translations {
       defaultsLabel: string
       reasoning: string
       reasoningOff: string
+      speed: string
+      speedStandard: string
       defaultsFailed: string
       loadFailed: string
       restartRequired: string
@@ -2125,6 +2127,7 @@ export interface Translations {
         no_interactive_session: string
         version_too_old: string
         missing_app: string
+        unsupported_gpu: string
         unknown: string
       }
       catalogTitle: string
@@ -3873,6 +3876,8 @@ export interface Translations {
       options: string
       thinking: string
       fast: string
+      ultrafast: string
+      useStandardSpeed: string
       effort: string
       minimal: string
       low: string
