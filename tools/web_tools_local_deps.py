@@ -123,7 +123,7 @@ def _run_installer(timeout: float) -> int:
     from patchright._impl._driver import compute_driver_executable, get_driver_env
     node, cli = compute_driver_executable()
     proc = subprocess.run([str(node), str(cli), "install", "chromium"], env=get_driver_env(),
-                          capture_output=True, text=True, timeout=timeout)
+                          stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0:
         logger.warning("patchright chromium install failed (rc=%s): %s", proc.returncode, (proc.stderr or proc.stdout)[-800:])
     return proc.returncode
