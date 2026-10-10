@@ -76,13 +76,18 @@ def run_tool_round(
 
     # ── Fork: Track Tool Calls (for summary) ──────────────────
     # Record all tool calls in this turn for transparency.
+    # Defensive: run_tool_round can be driven without the per-turn init in
+    # conversation_loop (e.g. agents built via AIAgent.__new__ in tests).
     import json as _json
+    _tracked_calls = getattr(agent, "_current_turn_tool_calls", None)
+    if _tracked_calls is None:
+        _tracked_calls = agent._current_turn_tool_calls = []
     for tc in assistant_message.tool_calls:
         try:
             args = _json.loads(tc.function.arguments) if tc.function.arguments else {}
         except (_json.JSONDecodeError, TypeError):
             args = {}
-        agent._current_turn_tool_calls.append({
+        _tracked_calls.append({
             "name": tc.function.name,
             "arguments": args,
         })
