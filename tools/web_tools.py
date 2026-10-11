@@ -466,7 +466,7 @@ def _is_ncbi_article_url(url: str) -> bool:
 
 
 def _visible_text(raw_html: str) -> str:
-    text = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>|<[^>]+>", " ", raw_html, flags=re.I)
+    text = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>|<[^>]+>", " ", raw_html, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -554,7 +554,7 @@ class _LocalFetchBlocked(Exception):
     """A hop of the local fetch targets a private address or a policy-blocked site. Carries the
     offending URL and, for a policy block, the block metadata; never falls back to a cloud backend."""
 
-    def __init__(self, url: str, message: str, blocked: Optional[Dict[str, str]] = None):
+    def __init__(self, url: str, message: str, blocked: Optional[dict[str, str]] = None):
         super().__init__(message)
         self.url, self.message, self.blocked = url, message, blocked
 
@@ -648,7 +648,7 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
             _ncbi_has_content: Optional[Callable[[bytes], bool]] = (
                 _has_pubmed_article_content if is_pubmed else _bookshelf_has_content if is_bookshelf else None)
             _ncbi_label = "PubMed" if is_pubmed else "Bookshelf"
-            _captured: Dict[str, Any] = {}
+            _captured: dict[str, Any] = {}
 
             async def _ncbi_page_action(page):
                 _captured["ready"] = await _wait_for_ncbi_content(page, _ncbi_has_content, label=_ncbi_label)
@@ -696,7 +696,7 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
                             session.fetch(**fetch_kwargs),
                             timeout=_scrapling_hard_timeout,
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         logger.warning(
                             "Scrapling fetch timed out after %ds (CF solve=%s) — "
                             "Cloudflare challenge likely unsolvable, skipping to next tier",
@@ -774,7 +774,7 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
     raise Exception(f"All local fetchers failed for {url}")
 
 
-async def _fetch_jina(url: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
+async def _fetch_jina(url: str, timeout: int = 30) -> Optional[dict[str, Any]]:
     """Fetch article content via Jina Reader (free, no API key needed for r.jina.ai)."""
     try:
         import httpx
@@ -805,7 +805,7 @@ async def _fetch_jina(url: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
         return None
 
 
-async def _fetch_and_process_locally(url: str, timeout: int = 60) -> Optional[Dict[str, Any]]:
+async def _fetch_and_process_locally(url: str, timeout: int = 60) -> Optional[dict[str, Any]]:
     """
     Fetch URL using tiered local fetchers and process content.
     
@@ -912,7 +912,7 @@ async def _fetch_and_process_locally(url: str, timeout: int = 60) -> Optional[Di
     }
 
 
-def _blocked_entry(url: str, message: str, blocked: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+def _blocked_entry(url: str, message: str, blocked: Optional[dict[str, str]] = None) -> dict[str, Any]:
     """Per-URL entry for a fetch refused by the SSRF filter or the website blocklist. Same shape the
     firecrawl provider returns (``blocked_by_policy`` carries host/rule/source for a policy block)."""
     policy = {"blocked_by_policy": {k: blocked[k] for k in ("host", "rule", "source")}} if blocked else {}

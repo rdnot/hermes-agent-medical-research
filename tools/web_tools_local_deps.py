@@ -39,7 +39,7 @@ _stack_checked = False
 _chromium_checked = False
 
 
-def _import_stack() -> Dict[str, Any]:
+def _import_stack() -> dict[str, Any]:
     """The module-level names tools/web_tools.py binds at import, re-imported after an install."""
     from curl_cffi import requests as curl_requests
     from scrapling.fetchers import AsyncStealthySession
@@ -53,11 +53,11 @@ def _import_stack() -> Dict[str, Any]:
     }
 
 
-def stack_present(target_globals: Dict[str, Any]) -> bool:
+def stack_present(target_globals: dict[str, Any]) -> bool:
     return all(target_globals.get(flag) for flag in STACK_FLAGS)
 
 
-def ensure_local_fetcher_stack(target_globals: Dict[str, Any]) -> bool:
+def ensure_local_fetcher_stack(target_globals: dict[str, Any]) -> bool:
     """Make the ``web-local`` extra importable in *target_globals* (tools.web_tools' namespace),
     installing it through PM on first use. Once per process: a declined prompt, a failed sync or
     a generation that needs a restart is reported once, then the fetcher runs degraded."""
@@ -107,7 +107,7 @@ def required_chromium_revision() -> Optional[str]:
         for browser in json.loads(manifest.read_text(encoding="utf-8-sig")).get("browsers", []):
             if browser.get("name") == "chromium":
                 return str(browser["revision"])
-    except Exception as exc:  # noqa: BLE001 — no patchright, or an unexpected driver layout
+    except Exception as exc:  # no patchright, or an unexpected driver layout
         logger.debug("patchright chromium revision unavailable: %s", exc)
     return None
 
@@ -123,7 +123,8 @@ def _run_installer(timeout: float) -> int:
     from patchright._impl._driver import compute_driver_executable, get_driver_env
     node, cli = compute_driver_executable()
     proc = subprocess.run([str(node), str(cli), "install", "chromium"], env=get_driver_env(),
-                          stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+                          stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout,
+                          check=False)
     if proc.returncode != 0:
         logger.warning("patchright chromium install failed (rc=%s): %s", proc.returncode, (proc.stderr or proc.stdout)[-800:])
     return proc.returncode
@@ -149,7 +150,7 @@ def ensure_chromium(timeout: float = CHROMIUM_INSTALL_TIMEOUT_S) -> bool:
         if _run_installer(timeout) == 0 and chromium_installed(root, revision):
             logger.info("Chromium %s ready for Scrapling", revision)
             return True
-    except Exception as exc:  # noqa: BLE001 — timeout, missing node binary, network
+    except Exception as exc:  # timeout, missing node binary, network
         logger.warning("Chromium download failed: %s", exc)
     logger.warning("Scrapling tier unavailable until Chromium is installed: run `python -m patchright install chromium` "
                    "from the Hermes venv.")

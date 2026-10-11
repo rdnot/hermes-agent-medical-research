@@ -27,7 +27,7 @@ def _fake_stack(monkeypatch):
 def test_stack_install_runs_once_and_rebinds_the_fetcher_namespace(monkeypatch):
     monkeypatch.setattr(deps, "_stack_checked", False)
     _fake_stack(monkeypatch)
-    import pm.extras as extras
+    from pm import extras
     calls = []
     monkeypatch.setattr(extras, "ensure_import", lambda extra: calls.append(extra))
     ns = {flag: False for flag in deps.STACK_FLAGS}
@@ -44,7 +44,7 @@ def test_stack_install_runs_once_and_rebinds_the_fetcher_namespace(monkeypatch):
 
 def test_stack_install_failure_is_reported_once_then_degrades(monkeypatch):
     monkeypatch.setattr(deps, "_stack_checked", False)
-    import pm.extras as extras
+    from pm import extras
     calls = []
 
     def _declined(extra):
