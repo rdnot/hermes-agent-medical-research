@@ -26,7 +26,6 @@ ANCHORS: dict[str, str | tuple[str, ...]] = {
     # Fork (medical-research): local tiered fetcher for web_extract (tools/web_tools_local_deps.py).
     "web-local": ("curl_cffi", "scrapling", "trafilatura", "pymupdf"),
     "otlp": "opentelemetry.sdk",
-    "langfuse": "langfuse",
     "mistral": "mistralai",
     "edge-tts": "edge_tts",
     "neutts": "neutts",
