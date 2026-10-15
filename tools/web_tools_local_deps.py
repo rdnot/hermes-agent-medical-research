@@ -10,8 +10,11 @@ Both are provisioned here the first time ``extract_backend: local`` is used in a
 * the extra goes through ``pm.extras.ensure_and_bind`` — PM syncs the venv with the extra
   enabled and records it in its ledger, so every later generation rebuild keeps it (the same
   path the firecrawl / parallel providers use for their SDKs);
-* Chromium goes through patchright's own installer into playwright's browser cache, which lives
-  outside the venv and outside PM's tool store, so it survives rebuilds and ``pm gc``.
+* Chromium goes through patchright's own installer into playwright's browser root, which lives
+  outside the venv, so it survives rebuilds. Under PM that root is PM's tool store itself (PM's
+  chromium package exports ``PLAYWRIGHT_BROWSERS_PATH`` = the store), so the installer runs with
+  ``PLAYWRIGHT_SKIP_BROWSER_GC=1``: playwright's post-install GC deletes every ``ffmpeg-*`` /
+  ``chromium-*`` / ``winldd-*`` dir it does not own, which includes PM's ``ffmpeg-<ver>-<target>``.
 
 Each step runs once per process; a failure logs the manual command and the fetcher degrades
 to whatever tiers are importable (httpx at minimum).
@@ -122,7 +125,9 @@ def _run_installer(timeout: float) -> int:
     the driver node binary + cli.js is what that entry point runs."""
     from patchright._impl._driver import compute_driver_executable, get_driver_env
     node, cli = compute_driver_executable()
-    proc = subprocess.run([str(node), str(cli), "install", "chromium"], env=get_driver_env(),
+    # No browser GC: the browser root can be PM's tool store, where the GC deletes PM's ffmpeg.
+    env = {**get_driver_env(), "PLAYWRIGHT_SKIP_BROWSER_GC": "1"}
+    proc = subprocess.run([str(node), str(cli), "install", "chromium"], env=env,
                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout,
                           check=False)
     if proc.returncode != 0:

@@ -82,3 +82,24 @@ def test_chromium_download_only_when_pinned_revision_is_missing(monkeypatch, tmp
     monkeypatch.setattr(deps, "_run_installer", lambda timeout: runs.append("1300") or 1)
     assert deps.ensure_chromium() is False
     assert runs[-1] == "1300"
+
+
+def test_chromium_installer_disables_playwright_browser_gc(monkeypatch, tmp_path):
+    """The browser root can be PM's tool store; playwright's post-install GC would delete PM's
+    ``ffmpeg-<ver>-<target>`` entry there (its name starts with ``ffmpeg-``)."""
+    driver = types.ModuleType("patchright._impl._driver")
+    driver.compute_driver_executable = lambda: (tmp_path / "node.exe", tmp_path / "cli.js")
+    driver.get_driver_env = lambda: {"PATH": "x", "PLAYWRIGHT_BROWSERS_PATH": str(tmp_path)}
+    monkeypatch.setitem(sys.modules, "patchright._impl._driver", driver)
+    seen = {}
+
+    def _run(cmd, **kwargs):
+        seen.update(cmd=cmd, **kwargs)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(deps.subprocess, "run", _run)
+    assert deps._run_installer(5) == 0
+    assert seen["cmd"][-2:] == ["install", "chromium"]
+    assert seen["env"]["PLAYWRIGHT_SKIP_BROWSER_GC"] == "1"
+    assert seen["env"]["PLAYWRIGHT_BROWSERS_PATH"] == str(tmp_path)  # driver env is kept
+    assert seen["stdin"] is deps.subprocess.DEVNULL and seen["check"] is False
