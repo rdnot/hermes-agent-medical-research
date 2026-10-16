@@ -559,6 +559,11 @@ class _LocalFetchBlocked(Exception):
         self.url, self.message, self.blocked = url, message, blocked
 
 
+class _LocalTooManyRedirects(Exception):
+    """The curl_cffi tier hit ``_MAX_LOCAL_REDIRECTS``. A fetch failure, not a block: the next tier
+    (a browser often resolves cookie-gated redirect loops) and then the cloud fallback still get it."""
+
+
 _UNSAFE_HOP_MSG = "Blocked: URL targets a private or internal network address"
 _MAX_LOCAL_REDIRECTS = 10
 
@@ -622,7 +627,9 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
                 current = urljoin(current, location)
                 await _guard_hop(current)
             else:
-                raise _LocalFetchBlocked(current, f"Too many redirects (>{_MAX_LOCAL_REDIRECTS})")
+                # Not _LocalFetchBlocked: a redirect loop is a failure, so it escalates (and can reach
+                # the cloud fallback) instead of ending as a final per-URL error.
+                raise _LocalTooManyRedirects(f"Too many redirects (>{_MAX_LOCAL_REDIRECTS}) for {url}")
             curl_cffi_status = resp.status_code
             curl_cffi_content = resp.content
             if resp.status_code < 400 and _is_content_sufficient(resp.content, current):
@@ -1237,6 +1244,16 @@ def check_web_api_key() -> bool:
         return False
 
 
+def check_web_extract_available() -> bool:
+    """``check_fn`` gate for web_extract (fork): any web backend, or a ``web.extract_backend: local`` pin.
+
+    The local tiered fetcher needs no credentials (httpx is a core dependency; the rest of the stack
+    is provisioned on first use), so a local-only install must keep web_extract even when no cloud
+    key or keyless tier exists. web_search keeps :func:`check_web_api_key`: "local" is extract-only.
+    """
+    return _get_extract_backend() == "local" or check_web_api_key()
+
+
 # ─── Registry ─────────────────────────────────────────────────────────────────
 from tools.registry import registry, tool_error
 
@@ -1312,7 +1329,7 @@ registry.register(
         args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [], "markdown",
         char_limit=args.get("char_limit"),
     ),
-    check_fn=check_web_api_key,
+    check_fn=check_web_extract_available,
     requires_env=_web_requires_env(),
     is_async=True,
     emoji="📄",
