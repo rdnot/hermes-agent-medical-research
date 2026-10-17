@@ -990,6 +990,10 @@ def interactive_setup() -> None:
 
 
 def register(ctx) -> None:
+    # Fork: env -> GatewayConfig bridge (gateway.config_env). Loaded by path, not ``from . import``:
+    # tests load this adapter standalone (no package parent).
+    from gateway.platform_env import bundled_sibling
+    gateway_env = bundled_sibling("line")
     ctx.register_platform(
         name="line", label="LINE", adapter_factory=lambda cfg: LineAdapter(cfg), check_fn=check_requirements,
         dashboard_description="Use Hermes from LINE via the LINE Messaging API webhook.",
@@ -997,8 +1001,10 @@ def register(ctx) -> None:
         validate_config=validate_config, is_connected=is_connected,
         required_env=["LINE_CHANNEL_ACCESS_TOKEN", "LINE_CHANNEL_SECRET"], install_hint="pip install aiohttp",
         setup_fn=interactive_setup, env_enablement_fn=_env_enablement, cron_deliver_env_var="LINE_HOME_CHANNEL",
-        standalone_sender_fn=_standalone_send, allowed_users_env="LINE_ALLOWED_USERS",
-        allow_all_env="LINE_ALLOW_ALL_USERS",
+        standalone_sender_fn=_standalone_send,
+        # Fork: env rows for the static Platform.LINE member (see gateway_env.py).
+        env_overrides=gateway_env.ENV_OVERRIDES,
+        env_enable_credentials=gateway_env.ENV_ENABLE_CREDENTIALS, **gateway_env.AUTHZ,
         max_message_length=LINE_SAFE_BUBBLE_CHARS,  # per-bubble cap is 5000; smart-chunker uses 4500
         emoji="💚", pii_safe=False, allow_update_command=True,
         platform_hint=(
