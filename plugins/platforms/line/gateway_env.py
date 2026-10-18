@@ -22,4 +22,7 @@ ENV_OVERRIDES = (
 AUTHZ = {
     "allowed_users_env": "LINE_ALLOWED_USERS",
     "allow_all_env": "LINE_ALLOW_ALL_USERS",
+    # Fork: chat-scoped group allowlist (was the LINE row of the old ``_GROUP_CHAT_ENV`` map in
+    # gateway/authz_mixin.py; upstream moved that map onto ``PlatformEntry.group_allowed_chats_env``).
+    "group_allowed_chats_env": "LINE_ALLOWED_GROUPS",
 }
