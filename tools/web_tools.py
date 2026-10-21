@@ -31,7 +31,7 @@ except ImportError:
 
 try:
     # Public API path: `scrapling.fetchers` lazy-exports AsyncStealthySession
-    # via its _LAZY_IMPORTS dict (verified on Scrapling 0.4.9). Prefer this over
+    # via its _LAZY_IMPORTS dict (verified on Scrapling 0.5). Prefer this over
     # the deep internal path `scrapling.engines._browsers._stealth` because the
     # latter is a private module (leading underscore) and may move between
     # Scrapling releases. Both paths resolve to the same class object.
@@ -685,11 +685,12 @@ async def _fetch_raw(url: str, timeout: int = 60) -> tuple[bytes, dict, int, str
                     # network_idle=False — Reddit/CF never fully idle (polls, pings)
                     # Use shorter timeout for CF sites (30s), longer for Reddit/SPA (45s)
                     fetch_timeout = 30000 if solve_cf else min(timeout * 1000, 45000)
+                    # Scrapling's per-fetch timeout key is ``timeout`` (ms). Unknown keys are dropped
+                    # silently by its validator, so a wrong name falls back to the 30 s default.
                     fetch_kwargs = dict(
                         url=url,
                         network_idle=False,
-                        adaptive=True,
-                        timeout_ms=fetch_timeout,
+                        timeout=fetch_timeout,
                     )
                     if _ncbi_has_content is not None:
                         _captured.clear()

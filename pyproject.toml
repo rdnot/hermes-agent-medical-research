@@ -275,8 +275,8 @@ modal = ["modal==1.5.5"]
 # needs is a per-machine step: `python -m patchright install chromium`.
 web-local = [
   "curl_cffi==0.16.3",
-  "scrapling[fetchers]==0.4.15",
-  "trafilatura==2.2.0",
+  "scrapling[fetchers]==0.5",
+  "trafilatura==2.3.1",
   "pymupdf==1.28.2",
 ]
 daytona = ["daytona==0.155.0"]
