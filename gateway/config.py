@@ -238,7 +238,6 @@ class Platform(Enum):
     WEIXIN = "weixin"
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
-    YUANBAO = "yuanbao"
     LINE = "line"  # Fork: static LINE member required by gateway/run.py platform_group_chat_env_map
     RELAY = "relay"  # generic relay adapter fronted by the connector (EXPERIMENTAL)
 
