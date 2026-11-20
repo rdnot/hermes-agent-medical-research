@@ -6,7 +6,7 @@ whitelisted ``_RESULT_PASSTHROUGH`` keys. ``tool_summary`` must survive that hop
 ``cli_chat_turn_mixin`` silently prints nothing.
 """
 from gateway.session_cli_turn import _RESULT_PASSTHROUGH, take_cli_result_fields
-from hermes_state_terminal import compact_result
+from session_rules.results import compact_result
 
 
 def test_tool_summary_is_whitelisted():
@@ -27,4 +27,14 @@ def test_stored_receipt_keeps_tool_summary():
     gateway_result = {"final_response": "ok", "messages": []}
     cli_fields = take_cli_result_fields({"final_response": "ok", "tool_summary": "S"})
     stored = compact_result({"result": {**gateway_result, **cli_fields}, "usage": {}}, user_message="hi")
+    assert stored["result"]["tool_summary"] == "S"
+
+
+def test_settlement_prepare_result_keeps_tool_summary():
+    # The real hop the gateway authority runs before storing the admission receipt.
+    from gateway.session_results import prepare_result
+    cli_fields = take_cli_result_fields({"final_response": "ok", "tool_summary": "S"})
+    result = {"result": {"final_response": "ok", "messages": [], **cli_fields}, "usage": {}}
+    outcome, stored = prepare_result({"payload": {"text": "hi"}}, "ok", "completed", result)
+    assert outcome == "completed"
     assert stored["result"]["tool_summary"] == "S"
