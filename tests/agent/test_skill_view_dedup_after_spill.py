@@ -15,11 +15,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tools.budget_config import DEFAULT_RESULT_SIZE_CHARS, DEFAULT_TURN_BUDGET_CHARS
 from tools.skills_tool_dedup import reset_skill_view_dedup
 from tools.tool_result_storage import PERSISTED_OUTPUT_TAG, extract_persisted_path
 
 TASK = "skill-spill-task"
 STUB_MARKER = '"content_returned": false'
+
+# FORK: the fork raises the per-result/per-turn caps (tools/budget_config.py 400K/500K vs upstream
+# 100K/200K), so skill sizes are derived from the caps in upstream's proportions (1.5x the per-result
+# cap; 0.35/0.35/0.40 of the turn budget). On upstream values this is exactly 150K and 70K/70K/80K.
+_PER_RESULT_SPILL_CHARS = DEFAULT_RESULT_SIZE_CHARS * 3 // 2
+_TURN_SHARE_SMALL = DEFAULT_TURN_BUDGET_CHARS * 35 // 100
+_TURN_SHARE_LARGE = DEFAULT_TURN_BUDGET_CHARS * 40 // 100
 
 
 def _write_skill(home, name: str, chars: int) -> None:
@@ -83,7 +91,7 @@ def _run(home, monkeypatch, *batches, dedup_reset_before: tuple[int, ...] = ()) 
     agent.tool_delay = 0
     agent.save_trajectories = False
     agent.compression_enabled = False  # no compaction or prune: either would release the dedup on its own
-    agent.context_compressor.context_length = 1_000_000  # the 200K+ budget: 100K per result, 200K per turn
+    agent.context_compressor.context_length = 1_000_000  # window fractions exceed the caps: the caps decide
     with (
         patch.object(agent, "_persist_session"),
         patch.object(agent, "_save_trajectory"),
@@ -95,7 +103,7 @@ def _run(home, monkeypatch, *batches, dedup_reset_before: tuple[int, ...] = ()) 
 
 
 def test_views_after_a_per_result_spill_lead_back_to_the_skill(home, monkeypatch):
-    _write_skill(home, "big-skill", 150_000)
+    _write_skill(home, "big-skill", _PER_RESULT_SPILL_CHARS)
 
     rows = _run(home, monkeypatch, *(_views(view, "big-skill") for view in ("first", "again", "third")))
 
@@ -107,7 +115,8 @@ def test_views_after_a_per_result_spill_lead_back_to_the_skill(home, monkeypatch
 
 
 def test_view_after_a_turn_budget_spill_serves_only_the_spilled_skill_again(home, monkeypatch):
-    for name, chars in (("skill-a", 70_000), ("skill-b", 70_000), ("skill-c", 80_000)):
+    for name, chars in (("skill-a", _TURN_SHARE_SMALL), ("skill-b", _TURN_SHARE_SMALL),
+                        ("skill-c", _TURN_SHARE_LARGE)):
         _write_skill(home, name, chars)
 
     rows = _run(home, monkeypatch, _views("first", "skill-a", "skill-b", "skill-c"),
