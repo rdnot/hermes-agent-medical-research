@@ -98,7 +98,7 @@
       "stable": 2420,
       "volatile": 1264
     },
-    "tool_tokens": 9631,
+    "tool_tokens": 9632,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -191,7 +191,7 @@
       "stable": 1495,
       "volatile": 1269
     },
-    "tool_tokens": 10131,
+    "tool_tokens": 10132,
     "tools": [
       "browser_cdp",
       "browser_dialog",
